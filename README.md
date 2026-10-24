@@ -1,52 +1,41 @@
-# nothingeats-kotlin-service-template
+# nothingeats-identity-service
 
-Template for a NothingEats bounded-context service: Kotlin, Ktor, hexagonal Gradle modules, kotlin-inject, Postgres. It builds, tests and runs out of the box with a small `Item` example that shows every pattern.
+Identity & access for [NothingEats](https://github.com/slashncode/nothingeats): accounts, email verification, login, tokens and the JWKS every other service verifies against.
 
-Part of [NothingEats](https://github.com/slashncode/nothingeats).
+## API (`/api/identity`)
 
-## Create a service
+| Method | Path | Auth | What |
+|---|---|---|---|
+| `POST` | `/v1/registrations` | – | `{email, password, locale?}` → `202`. Same answer whether the address exists or not; the owner of an existing account gets a mail instead. |
+| `POST` | `/v1/verifications` | – | `{token}` from the mail → `204`; the account becomes active |
+| `POST` | `/v1/sessions` | – | `{email, password}` → access token in the body, refresh token as `ne_refresh` cookie |
+| `POST` | `/v1/sessions/refresh` | cookie | New access token, rotated refresh cookie |
+| `DELETE` | `/v1/sessions/current` | cookie | Revokes the refresh token family, clears the cookie |
+| `GET` | `/v1/me` | Bearer | Profile of the caller |
+| `GET` | `/.well-known/jwks.json` | – | Public signing keys (current + next + recently retired) |
 
-1. **Use this template** on GitHub → `nothingeats-<context>-service`, clone it next to the other repos.
-2. `scripts/init-service.sh <context>` renames packages, project and image. CI pushes a signed image on main automatically in every repo created from the template.
-3. Replace the `Item` example with the real domain.
+Errors are RFC 9457 problems with stable codes, e.g. `INVALID_CREDENTIALS`, `EMAIL_NOT_VERIFIED`, `REFRESH_TOKEN_REUSED`.
 
-## Modules
+## Security design
 
-| Module | Contains | May depend on |
-|---|---|---|
-| `domain` | Aggregates, value objects, domain exceptions | nothing (pure Kotlin) |
-| `application` | Use cases, ports (`ItemRepository`), test fixtures (in-memory port implementations) | `domain`, `platform-core` |
-| `adapters` | Ktor routes, Exposed repositories, Flyway migrations (`db/migration`) | `application`, `platform-http`, `platform-persistence` |
-| `app` | kotlin-inject composition root, typed config, `main`, logging config | everything |
-
-The module graph enforces the dependency direction at compile time; Konsist tests in `app` cover the rest (domain imports, HTTP adapters never touching persistence).
+- **Passwords**: Argon2id (19 MiB, t=2, p=1) in PHC format, rehashed on login when parameters change. Length-only policy, 10–128 characters (NIST SP 800-63B).
+- **No account enumeration**: registration always answers `202` and always hashes; login checks a dummy hash for unknown addresses and answers `INVALID_CREDENTIALS` for both cases.
+- **Access tokens**: RS256, 15 minutes, `iss`/`aud`/`sub`/`roles`/`locale`, verified by every service via JWKS.
+- **Refresh tokens**: 256-bit opaque, stored as SHA-256, `httpOnly; SameSite=Strict` cookie scoped to `/api/identity/v1/sessions`, rotated on every use. Presenting a used token revokes the whole token family.
+- **Signing keys**: RSA-2048 in Postgres, private keys AES-256-GCM encrypted with `KEYS__ENCRYPTION_KEY` (key id as authenticated data). Always a current and a next key; `cron rotate-signing-keys` retires, promotes and creates; retired keys stay published for an hour.
+- **Events** through the transactional outbox: see [docs/events.md](docs/events.md).
 
 ## Run
 
-One image, three modes: `serve` (default), `migrate`, `cron <task>`.
-
 ```bash
-./gradlew build                     # compile, ktlint, tests (Docker needed for Testcontainers)
+./gradlew build    # tests need Docker (Postgres + Kafka via Testcontainers)
 
-export DATABASE__URL=jdbc:postgresql://localhost:15432/example DATABASE__USER=example DATABASE__PASSWORD=...
-./gradlew :app:run --args=migrate   # apply migrations
-./gradlew :app:run                  # serve on :8080, readable logs
-
-# In the k3d cluster, from the hub repo: Flux steps aside, Tilt rebuilds and redeploys on every change
-just dev <context>-service           # stop with: just dev-stop <context>-service
-
-./gradlew :app:jibDockerBuild -Djib.from.platforms=linux/arm64   # local image
+export DATABASE__URL=jdbc:postgresql://localhost:15432/identity DATABASE__USER=identity DATABASE__PASSWORD=...
+export KEYS__ENCRYPTION_KEY=$(openssl rand -base64 32)
+./gradlew :app:run --args=migrate && ./gradlew :app:run
 ```
 
-Configuration comes from env vars only: `__` nests, `_` separates words (`HTTP__PORT`, `DATABASE__MAXIMUM_POOL_SIZE`, `LIFECYCLE__DRAIN_DELAY`). Missing values stop the service at startup with a full report.
-
-## What the example shows
-
-- Domain rules as plain exceptions (`InvalidItemName`, `ItemNameTaken`), mapped to `AppError` in the use cases.
-- A unique constraint mapped to a domain exception by SQLSTATE and constraint name, surfacing as `409 ITEM_NAME_TAKEN`.
-- RFC 9457 problem responses with stable codes and the request id.
-- Lifecycle components, health checks and routes collected with `@IntoSet` in `ServiceComponent`.
-- A smoke test that wires the real composition root against real Postgres.
+In the k3d cluster: `just dev identity-service` from the hub repo.
 
 ## License
 

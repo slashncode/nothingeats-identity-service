@@ -10,6 +10,9 @@ dependencies {
     api(libs.nothingeats.platform.http)
     api(libs.nothingeats.platform.persistence)
     api(libs.nothingeats.ktor.posthog)
+    api(libs.nothingeats.platform.kafka)
+    implementation(libs.bouncycastle.prov)
+    implementation(libs.java.jwt)
     implementation(libs.exposed.java.time)
 
     testImplementation(testFixtures(project(":application")))

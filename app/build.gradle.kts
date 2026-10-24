@@ -4,7 +4,7 @@ plugins {
 }
 
 application {
-    mainClass = "io.github.slashncode.nothingeats.example.app.MainKt"
+    mainClass = "io.github.slashncode.nothingeats.identity.app.MainKt"
 }
 
 dependencies {
