@@ -1,0 +1,16 @@
+<configuration>
+    <!-- Readable logs for local runs and tests. -->
+    <appender name="plain" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level [%X{request_id:--}] %logger{24} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="com.zaxxer.hikari" level="WARN"/>
+    <logger name="io.netty" level="WARN"/>
+    <logger name="org.flywaydb" level="INFO"/>
+
+    <root level="INFO">
+        <appender-ref ref="plain"/>
+    </root>
+</configuration>

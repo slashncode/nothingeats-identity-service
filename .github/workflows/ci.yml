@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  kotlin:
+    uses: slashncode/nothingeats-ci/.github/workflows/kotlin.yml@main
+    permissions:
+      contents: write # dependency graph submission on main
+    with:
+      verify-image: true
+
+  # Services push a signed image on main; the template itself only verifies that it builds.
+  image:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository != 'slashncode/nothingeats-kotlin-service-template'
+    needs: kotlin
+    uses: slashncode/nothingeats-ci/.github/workflows/kotlin-image.yml@main
+    permissions:
+      contents: read
+      packages: write # push the image to GHCR
+      id-token: write # keyless cosign signing
+
+  codeql:
+    uses: slashncode/nothingeats-ci/.github/workflows/codeql.yml@main
+    permissions:
+      contents: read
+      security-events: write
+
+  pr:
+    if: github.event_name == 'pull_request'
+    uses: slashncode/nothingeats-ci/.github/workflows/pr-hygiene.yml@main
+    permissions:
+      contents: read
+      pull-requests: write

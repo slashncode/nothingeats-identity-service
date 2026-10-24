@@ -1,0 +1,14 @@
+<configuration>
+    <!-- JSON logs for the cluster. `./gradlew :app:run` uses logback-plain.xml instead. -->
+    <appender name="json" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder"/>
+    </appender>
+
+    <logger name="com.zaxxer.hikari" level="WARN"/>
+    <logger name="io.netty" level="WARN"/>
+    <logger name="org.flywaydb" level="INFO"/>
+
+    <root level="INFO">
+        <appender-ref ref="json"/>
+    </root>
+</configuration>
