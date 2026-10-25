@@ -73,6 +73,10 @@ data class User(
 
     fun withPasswordHash(hash: String) = copy(passwordHash = hash)
 
+    fun withRole(role: Role) = copy(roles = roles + role)
+
+    fun withoutRole(role: Role) = copy(roles = roles - role)
+
     companion object {
         fun register(
             email: Email,

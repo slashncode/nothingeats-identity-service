@@ -11,6 +11,7 @@ dependencies {
     api(libs.nothingeats.platform.persistence)
     api(libs.nothingeats.ktor.posthog)
     api(libs.nothingeats.platform.kafka)
+    api(libs.nothingeats.platform.valkey)
     implementation(libs.bouncycastle.prov)
     implementation(libs.java.jwt)
     implementation(libs.exposed.java.time)

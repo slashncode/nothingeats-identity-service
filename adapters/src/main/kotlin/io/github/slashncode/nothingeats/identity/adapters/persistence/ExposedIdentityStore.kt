@@ -1,6 +1,7 @@
 package io.github.slashncode.nothingeats.identity.adapters.persistence
 
 import io.github.slashncode.nothingeats.identity.application.EmailVerifications
+import io.github.slashncode.nothingeats.identity.application.PasswordResets
 import io.github.slashncode.nothingeats.identity.application.RefreshTokens
 import io.github.slashncode.nothingeats.identity.application.Transactions
 import io.github.slashncode.nothingeats.identity.application.Users
@@ -8,6 +9,7 @@ import io.github.slashncode.nothingeats.identity.domain.Email
 import io.github.slashncode.nothingeats.identity.domain.EmailAlreadyRegistered
 import io.github.slashncode.nothingeats.identity.domain.EmailVerification
 import io.github.slashncode.nothingeats.identity.domain.Locale
+import io.github.slashncode.nothingeats.identity.domain.PasswordReset
 import io.github.slashncode.nothingeats.identity.domain.RefreshToken
 import io.github.slashncode.nothingeats.identity.domain.Role
 import io.github.slashncode.nothingeats.identity.domain.User
@@ -45,6 +47,15 @@ internal object UsersTable : Table("users") {
 }
 
 internal object EmailVerificationsTable : Table("email_verifications") {
+    val tokenHash = text("token_hash")
+    val userId = uuid("user_id")
+    val expiresAt = timestamp("expires_at")
+    val usedAt = timestamp("used_at").nullable()
+
+    override val primaryKey = PrimaryKey(tokenHash)
+}
+
+internal object PasswordResetsTable : Table("password_resets") {
     val tokenHash = text("token_hash")
     val userId = uuid("user_id")
     val expiresAt = timestamp("expires_at")
@@ -173,6 +184,48 @@ class ExposedEmailVerifications(
     }
 }
 
+class ExposedPasswordResets(
+    private val db: PostgresDatabase,
+) : PasswordResets {
+    override suspend fun add(reset: PasswordReset) {
+        db.transaction {
+            PasswordResetsTable.insert {
+                it[tokenHash] = reset.tokenHash
+                it[userId] = reset.userId.value
+                it[expiresAt] = reset.expiresAt
+                it[usedAt] = reset.usedAt
+            }
+        }
+    }
+
+    override suspend fun find(tokenHash: String): PasswordReset? =
+        db.transaction(readOnly = true) {
+            PasswordResetsTable
+                .selectAll()
+                .where { PasswordResetsTable.tokenHash eq tokenHash }
+                .singleOrNull()
+                ?.let {
+                    PasswordReset(
+                        tokenHash = it[PasswordResetsTable.tokenHash],
+                        userId = UserId(it[PasswordResetsTable.userId]),
+                        expiresAt = it[PasswordResetsTable.expiresAt],
+                        usedAt = it[PasswordResetsTable.usedAt],
+                    )
+                }
+        }
+
+    // Conditional, like refresh tokens: of two confirmations with the same link only one wins.
+    override suspend fun markUsed(
+        tokenHash: String,
+        now: Instant,
+    ): Boolean =
+        db.transaction {
+            PasswordResetsTable.update({ (PasswordResetsTable.tokenHash eq tokenHash) and PasswordResetsTable.usedAt.isNull() }) {
+                it[usedAt] = now
+            } == 1
+        }
+}
+
 class ExposedRefreshTokens(
     private val db: PostgresDatabase,
 ) : RefreshTokens {
@@ -226,6 +279,17 @@ class ExposedRefreshTokens(
     ) {
         db.transaction {
             RefreshTokensTable.update({ (RefreshTokensTable.familyId eq familyId) and RefreshTokensTable.revokedAt.isNull() }) {
+                it[revokedAt] = now
+            }
+        }
+    }
+
+    override suspend fun revokeAll(
+        userId: UserId,
+        now: Instant,
+    ) {
+        db.transaction {
+            RefreshTokensTable.update({ (RefreshTokensTable.userId eq userId.value) and RefreshTokensTable.revokedAt.isNull() }) {
                 it[revokedAt] = now
             }
         }

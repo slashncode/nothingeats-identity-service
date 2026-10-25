@@ -3,9 +3,12 @@ package io.github.slashncode.nothingeats.identity.application
 import io.github.slashncode.nothingeats.identity.domain.Email
 import io.github.slashncode.nothingeats.identity.domain.EmailAlreadyRegistered
 import io.github.slashncode.nothingeats.identity.domain.EmailVerification
+import io.github.slashncode.nothingeats.identity.domain.PasswordReset
 import io.github.slashncode.nothingeats.identity.domain.RefreshToken
 import io.github.slashncode.nothingeats.identity.domain.User
 import io.github.slashncode.nothingeats.identity.domain.UserId
+import io.github.slashncode.nothingeats.platform.core.error.AppError
+import io.github.slashncode.nothingeats.platform.core.error.ErrorCode
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -47,6 +50,32 @@ class InMemoryEmailVerifications : EmailVerifications {
     }
 }
 
+class InMemoryPasswordResets : PasswordResets {
+    val all = ConcurrentHashMap<String, PasswordReset>()
+
+    override suspend fun add(reset: PasswordReset) {
+        all[reset.tokenHash] = reset
+    }
+
+    override suspend fun find(tokenHash: String) = all[tokenHash]
+
+    override suspend fun markUsed(
+        tokenHash: String,
+        now: Instant,
+    ): Boolean {
+        var claimed = false
+        all.computeIfPresent(tokenHash) { _, reset ->
+            if (reset.usedAt == null) {
+                claimed = true
+                reset.copy(usedAt = now)
+            } else {
+                reset
+            }
+        }
+        return claimed
+    }
+}
+
 class InMemoryRefreshTokens : RefreshTokens {
     val all = ConcurrentHashMap<Uuid, RefreshToken>()
 
@@ -77,6 +106,13 @@ class InMemoryRefreshTokens : RefreshTokens {
         now: Instant,
     ) {
         all.replaceAll { _, t -> if (t.familyId == familyId && t.revokedAt == null) t.copy(revokedAt = now) else t }
+    }
+
+    override suspend fun revokeAll(
+        userId: UserId,
+        now: Instant,
+    ) {
+        all.replaceAll { _, t -> if (t.userId == userId && t.revokedAt == null) t.copy(revokedAt = now) else t }
     }
 }
 
@@ -116,6 +152,44 @@ class RecordingUserEvents : UserEvents {
 
     override suspend fun verified(user: User) {
         events += "verified:${user.email}"
+    }
+
+    var lastResetToken: String? = null
+
+    override suspend fun passwordResetRequested(
+        user: User,
+        resetToken: String,
+    ) {
+        events += "reset-requested:${user.email}"
+        lastResetToken = resetToken
+    }
+
+    override suspend fun passwordChanged(user: User) {
+        events += "password-changed:${user.email}"
+    }
+}
+
+/** Enforces the real limits in memory; windows never end (tests are faster than any window). */
+class InMemoryThrottle : Throttle {
+    val counts = ConcurrentHashMap<Pair<String, String>, Int>()
+
+    override suspend fun attempt(
+        rule: ThrottleRule,
+        subject: String,
+    ) {
+        val count = counts.merge(rule.name to subject, 1, Int::plus)!!
+        if (count > rule.limit) throw AppError.RateLimited(ErrorCode("TOO_MANY_ATTEMPTS"), retryAfter = rule.window)
+    }
+
+    override suspend fun ensureAllowed(
+        rule: ThrottleRule,
+        subject: String,
+    ) {
+        if ((counts[rule.name to subject] ?: 0) >=
+            rule.limit
+        ) {
+            throw AppError.RateLimited(ErrorCode("TOO_MANY_ATTEMPTS"), retryAfter = rule.window)
+        }
     }
 }
 

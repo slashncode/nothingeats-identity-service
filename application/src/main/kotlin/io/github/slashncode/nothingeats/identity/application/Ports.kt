@@ -2,6 +2,7 @@ package io.github.slashncode.nothingeats.identity.application
 
 import io.github.slashncode.nothingeats.identity.domain.Email
 import io.github.slashncode.nothingeats.identity.domain.EmailVerification
+import io.github.slashncode.nothingeats.identity.domain.PasswordReset
 import io.github.slashncode.nothingeats.identity.domain.RefreshToken
 import io.github.slashncode.nothingeats.identity.domain.User
 import io.github.slashncode.nothingeats.identity.domain.UserId
@@ -31,6 +32,18 @@ interface EmailVerifications {
     )
 }
 
+interface PasswordResets {
+    suspend fun add(reset: PasswordReset)
+
+    suspend fun find(tokenHash: String): PasswordReset?
+
+    /** Atomically marks the reset used; false if it was used already (two tabs, a replayed link). */
+    suspend fun markUsed(
+        tokenHash: String,
+        now: Instant,
+    ): Boolean
+}
+
 interface RefreshTokens {
     suspend fun add(token: RefreshToken)
 
@@ -44,6 +57,12 @@ interface RefreshTokens {
 
     suspend fun revokeFamily(
         familyId: Uuid,
+        now: Instant,
+    )
+
+    /** Logs the user out everywhere. */
+    suspend fun revokeAll(
+        userId: UserId,
         now: Instant,
     )
 }
@@ -100,6 +119,13 @@ interface UserEvents {
     suspend fun registrationAttempted(existing: User)
 
     suspend fun verified(user: User)
+
+    suspend fun passwordResetRequested(
+        user: User,
+        resetToken: String,
+    )
+
+    suspend fun passwordChanged(user: User)
 }
 
 interface Transactions {

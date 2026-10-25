@@ -13,6 +13,16 @@ data class EmailVerification(
     fun isUsable(now: Instant) = usedAt == null && now.isBefore(expiresAt)
 }
 
+/** A one-time link to choose a new password; like [EmailVerification], only the hash is stored. */
+data class PasswordReset(
+    val tokenHash: String,
+    val userId: UserId,
+    val expiresAt: Instant,
+    val usedAt: Instant?,
+) {
+    fun isUsable(now: Instant) = usedAt == null && now.isBefore(expiresAt)
+}
+
 /**
  * An opaque refresh token, stored hashed. Every refresh replaces it with a new token of the same
  * [familyId]. A token that is presented again after it was used means it was stolen: the whole

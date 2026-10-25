@@ -9,22 +9,30 @@ import io.github.slashncode.nothingeats.identity.adapters.crypto.SecureRandomSec
 import io.github.slashncode.nothingeats.identity.adapters.http.IdentityRoutes
 import io.github.slashncode.nothingeats.identity.adapters.messaging.OutboxUserEvents
 import io.github.slashncode.nothingeats.identity.adapters.persistence.ExposedEmailVerifications
+import io.github.slashncode.nothingeats.identity.adapters.persistence.ExposedPasswordResets
 import io.github.slashncode.nothingeats.identity.adapters.persistence.ExposedRefreshTokens
 import io.github.slashncode.nothingeats.identity.adapters.persistence.ExposedTransactions
 import io.github.slashncode.nothingeats.identity.adapters.persistence.ExposedUsers
+import io.github.slashncode.nothingeats.identity.adapters.throttle.ValkeyThrottle
 import io.github.slashncode.nothingeats.identity.application.AccessTokens
+import io.github.slashncode.nothingeats.identity.application.AdminBootstrap
 import io.github.slashncode.nothingeats.identity.application.EmailVerifications
 import io.github.slashncode.nothingeats.identity.application.GetProfile
 import io.github.slashncode.nothingeats.identity.application.GetPublicKeys
 import io.github.slashncode.nothingeats.identity.application.Login
 import io.github.slashncode.nothingeats.identity.application.Logout
+import io.github.slashncode.nothingeats.identity.application.ManageRoles
 import io.github.slashncode.nothingeats.identity.application.PasswordHasher
+import io.github.slashncode.nothingeats.identity.application.PasswordResets
 import io.github.slashncode.nothingeats.identity.application.RefreshSession
 import io.github.slashncode.nothingeats.identity.application.RefreshTokens
 import io.github.slashncode.nothingeats.identity.application.RegisterUser
+import io.github.slashncode.nothingeats.identity.application.RequestPasswordReset
+import io.github.slashncode.nothingeats.identity.application.ResetPassword
 import io.github.slashncode.nothingeats.identity.application.Secrets
 import io.github.slashncode.nothingeats.identity.application.SessionIssuer
 import io.github.slashncode.nothingeats.identity.application.SigningKeys
+import io.github.slashncode.nothingeats.identity.application.Throttle
 import io.github.slashncode.nothingeats.identity.application.Transactions
 import io.github.slashncode.nothingeats.identity.application.UserEvents
 import io.github.slashncode.nothingeats.identity.application.Users
@@ -54,6 +62,8 @@ import io.github.slashncode.nothingeats.platform.persistence.PostgresDatabase
 import io.github.slashncode.nothingeats.platform.posthog.PostHogAnalytics
 import io.github.slashncode.nothingeats.platform.posthog.PostHogExceptionReporter
 import io.github.slashncode.nothingeats.platform.posthog.PostHogHttpExtension
+import io.github.slashncode.nothingeats.platform.valkey.RateLimiter
+import io.github.slashncode.nothingeats.platform.valkey.Valkey
 import me.tatarka.inject.annotations.Component
 import me.tatarka.inject.annotations.IntoSet
 import me.tatarka.inject.annotations.Provides
@@ -175,6 +185,22 @@ abstract class ServiceComponent(
     @Provides
     fun purgeMessaging(postgres: PostgresDatabase): CronTask = PurgeMessagingTask(postgres)
 
+    // Rate limits. Valkey is no readiness check: the limiter fails open, logins keep working.
+
+    @ServiceScope
+    @Provides
+    fun valkey(): Valkey = Valkey(config.valkey)
+
+    @IntoSet
+    @Provides
+    fun valkeyLifecycle(valkey: Valkey): LifecycleComponent = valkey
+
+    @Provides
+    fun throttle(
+        valkey: Valkey,
+        clock: Clock,
+    ): Throttle = ValkeyThrottle(RateLimiter(valkey, prefix = "identity", clock = clock))
+
     // Identity
 
     @ServiceScope
@@ -203,6 +229,12 @@ abstract class ServiceComponent(
 
     @Provides
     fun refreshTokens(postgres: PostgresDatabase): RefreshTokens = ExposedRefreshTokens(postgres)
+
+    @Provides
+    fun passwordResets(postgres: PostgresDatabase): PasswordResets = ExposedPasswordResets(postgres)
+
+    @Provides
+    fun adminBootstrap(): AdminBootstrap = AdminBootstrap(config.admin.emails)
 
     @Provides
     fun transactions(postgres: PostgresDatabase): Transactions = ExposedTransactions(postgres)
@@ -244,8 +276,9 @@ abstract class ServiceComponent(
         secrets: Secrets,
         clock: Clock,
         analytics: ProductAnalytics,
+        throttle: Throttle,
     ): RegisterUser =
-        RegisterUser(users, verifications, hasher, events, transactions, secrets, clock, analytics, config.tokens.verificationTtl)
+        RegisterUser(users, verifications, hasher, events, transactions, secrets, clock, analytics, throttle, config.tokens.verificationTtl)
 
     @Provides
     fun verifyEmail(
@@ -255,7 +288,8 @@ abstract class ServiceComponent(
         transactions: Transactions,
         clock: Clock,
         analytics: ProductAnalytics,
-    ): VerifyEmail = VerifyEmail(users, verifications, events, transactions, clock, analytics)
+        admins: AdminBootstrap,
+    ): VerifyEmail = VerifyEmail(users, verifications, events, transactions, clock, analytics, admins)
 
     @Provides
     fun login(
@@ -264,7 +298,33 @@ abstract class ServiceComponent(
         sessions: SessionIssuer,
         transactions: Transactions,
         analytics: ProductAnalytics,
-    ): Login = Login(users, hasher, sessions, transactions, analytics)
+        throttle: Throttle,
+        admins: AdminBootstrap,
+    ): Login = Login(users, hasher, sessions, transactions, analytics, throttle, admins)
+
+    @Provides
+    fun requestPasswordReset(
+        users: Users,
+        resets: PasswordResets,
+        events: UserEvents,
+        transactions: Transactions,
+        secrets: Secrets,
+        clock: Clock,
+        analytics: ProductAnalytics,
+        throttle: Throttle,
+    ): RequestPasswordReset = RequestPasswordReset(users, resets, events, transactions, secrets, clock, analytics, throttle)
+
+    @Provides
+    fun resetPassword(
+        users: Users,
+        resets: PasswordResets,
+        refreshTokens: RefreshTokens,
+        hasher: PasswordHasher,
+        events: UserEvents,
+        transactions: Transactions,
+        clock: Clock,
+        analytics: ProductAnalytics,
+    ): ResetPassword = ResetPassword(users, resets, refreshTokens, hasher, events, transactions, clock, analytics)
 
     @Provides
     fun refreshSession(
@@ -293,6 +353,9 @@ abstract class ServiceComponent(
         users: Users,
         keys: SigningKeys,
         clock: Clock,
+        requestPasswordReset: RequestPasswordReset,
+        resetPassword: ResetPassword,
+        analytics: ProductAnalytics,
     ): HttpRoutes =
         IdentityRoutes(
             registerUser,
@@ -301,6 +364,9 @@ abstract class ServiceComponent(
             refreshSession,
             logout,
             GetProfile(users),
+            requestPasswordReset,
+            resetPassword,
+            ManageRoles(users, analytics),
             GetPublicKeys(keys),
             config.cookie,
             clock,

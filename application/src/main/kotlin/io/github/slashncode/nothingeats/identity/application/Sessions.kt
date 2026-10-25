@@ -53,23 +53,33 @@ class Login(
     private val sessions: SessionIssuer,
     private val transactions: Transactions,
     private val analytics: ProductAnalytics,
+    private val throttle: Throttle,
+    private val admins: AdminBootstrap = AdminBootstrap(),
 ) {
     suspend operator fun invoke(
         email: String,
         password: String,
+        client: String,
     ): Session {
-        val user = runCatching { Email.parse(email) }.getOrNull()?.let { users.findByEmail(it) }
+        throttle.attempt(ThrottleRules.LOGIN_PER_CLIENT, client)
+        val address = runCatching { Email.parse(email) }.getOrNull()
+        // Same key for addresses with and without an account, so the limit reveals nothing.
+        val account = address?.value ?: email.trim().lowercase()
+        throttle.ensureAllowed(ThrottleRules.LOGIN_FAILURES_PER_ACCOUNT, account)
+        val user = address?.let { users.findByEmail(it) }
         val check = hasher.verify(password, user?.passwordHash ?: hasher.dummyHash)
         if (user == null || !check.matches) {
+            throttle.attempt(ThrottleRules.LOGIN_FAILURES_PER_ACCOUNT, account)
             throw AppError.Unauthenticated(ErrorCode("INVALID_CREDENTIALS"), "Email or password is wrong")
         }
         if (!user.isVerified) {
             throw AppError.Forbidden(ErrorCode("EMAIL_NOT_VERIFIED"), "Please confirm your email address first")
         }
-        val current = if (check.needsRehash) user.withPasswordHash(hasher.hash(password)) else user
+        val rehashed = if (check.needsRehash) user.withPasswordHash(hasher.hash(password)) else user
+        val current = admins.apply(rehashed)
         val session =
             transactions.run {
-                if (current !== user) users.save(current)
+                if (current != user) users.save(current)
                 sessions.issue(current)
             }
         analytics.capture("user_logged_in", distinctId = user.id.toString())

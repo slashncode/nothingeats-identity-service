@@ -15,6 +15,8 @@ object UserTopic {
     const val REGISTERED = "nothingeats.identity.user.registered.v1"
     const val REGISTRATION_ATTEMPTED = "nothingeats.identity.user.registration-attempted.v1"
     const val VERIFIED = "nothingeats.identity.user.verified.v1"
+    const val PASSWORD_RESET_REQUESTED = "nothingeats.identity.user.password-reset-requested.v1"
+    const val PASSWORD_CHANGED = "nothingeats.identity.user.password-changed.v1"
 }
 
 @Serializable
@@ -34,6 +36,21 @@ data class RegistrationAttemptedV1(
 
 @Serializable
 data class UserVerifiedV1(
+    val userId: String,
+    val email: String,
+    val locale: String,
+)
+
+@Serializable
+data class PasswordResetRequestedV1(
+    val userId: String,
+    val email: String,
+    val locale: String,
+    val resetToken: String,
+)
+
+@Serializable
+data class PasswordChangedV1(
     val userId: String,
     val email: String,
     val locale: String,
@@ -79,6 +96,33 @@ class OutboxUserEvents(
                 UserTopic.VERIFIED,
                 UserVerifiedV1(user.id.toString(), user.email.value, user.locale.tag),
                 UserVerifiedV1.serializer(),
+            )
+        }
+    }
+
+    override suspend fun passwordResetRequested(
+        user: User,
+        resetToken: String,
+    ) {
+        db.transaction {
+            outbox.enqueue(
+                UserTopic.NAME,
+                user.id.toString(),
+                UserTopic.PASSWORD_RESET_REQUESTED,
+                PasswordResetRequestedV1(user.id.toString(), user.email.value, user.locale.tag, resetToken),
+                PasswordResetRequestedV1.serializer(),
+            )
+        }
+    }
+
+    override suspend fun passwordChanged(user: User) {
+        db.transaction {
+            outbox.enqueue(
+                UserTopic.NAME,
+                user.id.toString(),
+                UserTopic.PASSWORD_CHANGED,
+                PasswordChangedV1(user.id.toString(), user.email.value, user.locale.tag),
+                PasswordChangedV1.serializer(),
             )
         }
     }

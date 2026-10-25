@@ -31,13 +31,16 @@ class RegisterUser(
     private val secrets: Secrets,
     private val clock: Clock,
     private val analytics: ProductAnalytics,
+    private val throttle: Throttle,
     private val verificationTtl: Duration = 24.hours,
 ) {
     suspend operator fun invoke(
         email: String,
         password: String,
         locale: String?,
+        client: String,
     ) {
+        throttle.attempt(ThrottleRules.REGISTRATION_PER_CLIENT, client)
         val address = parseEmail(email)
         checkPassword(password)
         val hash = hasher.hash(password)
@@ -73,6 +76,7 @@ class VerifyEmail(
     private val transactions: Transactions,
     private val clock: Clock,
     private val analytics: ProductAnalytics,
+    private val admins: AdminBootstrap = AdminBootstrap(),
 ) {
     suspend operator fun invoke(token: String) {
         val now = clock.instant()
@@ -81,7 +85,7 @@ class VerifyEmail(
                 val verification = verifications.find(TokenHashing.hash(token))?.takeIf { it.isUsable(now) } ?: throw invalidToken()
                 verifications.markUsed(verification.tokenHash, now)
                 val user = users.findById(verification.userId) ?: throw invalidToken()
-                user.verified(now).also { verified ->
+                admins.apply(user.verified(now)).also { verified ->
                     users.save(verified)
                     events.verified(verified)
                 }
@@ -108,13 +112,16 @@ internal fun parseEmail(raw: String): Email =
         )
     }
 
-internal fun checkPassword(raw: String) {
+internal fun checkPassword(
+    raw: String,
+    code: String = "REGISTRATION_INVALID",
+) {
     try {
         PasswordPolicy.check(raw)
     } catch (e: WeakPassword) {
         throw AppError.Invalid(
-            ErrorCode("REGISTRATION_INVALID"),
-            "The registration is invalid",
+            ErrorCode(code),
+            "The password is not acceptable",
             listOf(
                 Violation(
                     "password",

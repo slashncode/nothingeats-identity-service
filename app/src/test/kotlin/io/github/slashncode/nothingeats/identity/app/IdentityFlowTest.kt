@@ -9,6 +9,7 @@ import io.github.slashncode.nothingeats.platform.kafka.KafkaClients
 import io.github.slashncode.nothingeats.platform.kafka.KafkaConfig
 import io.github.slashncode.nothingeats.platform.testing.KafkaTestCluster
 import io.github.slashncode.nothingeats.platform.testing.PostgresTestDatabases
+import io.github.slashncode.nothingeats.platform.testing.ValkeyTestServer
 import io.kotest.assertions.nondeterministic.eventually
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldHaveSize
@@ -52,6 +53,8 @@ class IdentityFlowTest :
                     database = PostgresTestDatabases.create(),
                     kafka = KafkaConfig(KafkaTestCluster.bootstrapServers),
                     keys = KeysConfig(Secret(randomAesKey())),
+                    valkey = ValkeyTestServer.config(),
+                    admin = AdminConfig(emails = listOf("boss@nothingeats.dev")),
                     lifecycle = LifecycleConfig(drainDelay = kotlin.time.Duration.ZERO),
                 )
             return ServiceComponent::class.create(config) to "http://localhost:$port/api/identity"
@@ -69,6 +72,8 @@ class IdentityFlowTest :
                     body?.let { BodyPublishers.ofString(it) } ?: BodyPublishers.noBody(),
                 )
             if (body != null) request.header("Content-Type", "application/json")
+            // A different client per request: per-client limits must not add up across tests.
+            request.header("X-Forwarded-For", "10.${(0..255).random()}.${(0..255).random()}.${(1..254).random()}")
             headers.forEach { (name, value) -> request.header(name, value) }
             return http.send(request.build(), BodyHandlers.ofString())
         }
@@ -78,8 +83,11 @@ class IdentityFlowTest :
         fun HttpResponse<String>.refreshCookie(): String =
             headers().allValues("Set-Cookie").first { it.startsWith("ne_refresh=") }.substringBefore(";")
 
-        /** The verification token as the notification service will read it: from the event on Kafka. */
-        fun verificationTokenFor(email: String): String {
+        fun tokenFromEvent(
+            email: String,
+            type: String,
+            field: String,
+        ): String {
             KafkaClients.consumer(KafkaConfig(KafkaTestCluster.bootstrapServers), "test-${UUID.randomUUID()}").use { consumer ->
                 consumer.subscribe(listOf(TOPIC))
                 val deadline = System.currentTimeMillis() + 20_000
@@ -87,17 +95,23 @@ class IdentityFlowTest :
                     for (record in consumer.poll(Duration.ofMillis(250))) {
                         val event = EventJson.decodeFromString(CloudEvent.serializer(), record.value().decodeToString())
                         val data = event.data.jsonObject
-                        if (event.type == "nothingeats.identity.user.registered.v1" && data["email"]?.jsonPrimitive?.content == email) {
-                            return data["verificationToken"]!!.jsonPrimitive.content
+                        if (event.type == type && data["email"]?.jsonPrimitive?.content == email) {
+                            return data[field]!!.jsonPrimitive.content
                         }
                     }
                 }
             }
-            error("No registration event for $email")
+            error("No $type event for $email")
         }
 
-        suspend fun registeredAndLoggedIn(api: String): Pair<String, HttpResponse<String>> {
-            val email = "ghost-${UUID.randomUUID()}@nothingeats.dev"
+        /** The verification token as the notification service will read it: from the event on Kafka. */
+        fun verificationTokenFor(email: String): String =
+            tokenFromEvent(email, "nothingeats.identity.user.registered.v1", "verificationToken")
+
+        suspend fun registeredAndLoggedIn(
+            api: String,
+            email: String = "ghost-${UUID.randomUUID()}@nothingeats.dev",
+        ): Pair<String, HttpResponse<String>> {
             send(
                 "POST",
                 "$api/v1/registrations",
@@ -167,6 +181,95 @@ class IdentityFlowTest :
 
                 eventually(5.seconds) { send("GET", "$api/.well-known/jwks.json").json()["keys"]!!.jsonArray shouldHaveSize 3 }
                 send("GET", "$api/v1/me", headers = mapOf("Authorization" to "Bearer $accessToken")).statusCode() shouldBe 200
+            } finally {
+                service.lifecycle.stop()
+            }
+        }
+        test("forgotten password: mail link, new password, every old session ends") {
+            val (service, api) = service()
+            service.migrations.migrate()
+            service.lifecycle.start()
+            try {
+                val (email, login) = registeredAndLoggedIn(api)
+                val oldCookie = login.refreshCookie()
+
+                send("POST", "$api/v1/password-resets", """{"email":"nobody-${UUID.randomUUID()}@nothingeats.dev"}""").statusCode() shouldBe
+                    202
+                send("POST", "$api/v1/password-resets", """{"email":"$email"}""").statusCode() shouldBe 202
+                val token = tokenFromEvent(email, "nothingeats.identity.user.password-reset-requested.v1", "resetToken")
+
+                send(
+                    "POST",
+                    "$api/v1/password-resets/confirmations",
+                    """{"token":"$token","password":"a brand new passphrase"}""",
+                ).statusCode() shouldBe
+                    204
+                send("POST", "$api/v1/password-resets/confirmations", """{"token":"$token","password":"a brand new passphrase"}""")
+                    .json()["code"]!!
+                    .jsonPrimitive.content shouldBe "PASSWORD_RESET_TOKEN_INVALID"
+
+                send("POST", "$api/v1/sessions/refresh", headers = mapOf("Cookie" to oldCookie)).statusCode() shouldBe 401
+                send("POST", "$api/v1/sessions", """{"email":"$email","password":"correct horse battery"}""").statusCode() shouldBe 401
+                send("POST", "$api/v1/sessions", """{"email":"$email","password":"a brand new passphrase"}""").statusCode() shouldBe 200
+                tokenFromEvent(email, "nothingeats.identity.user.password-changed.v1", "userId") shouldNotBe ""
+            } finally {
+                service.lifecycle.stop()
+            }
+        }
+
+        test("password guessing is stopped per account with 429 and Retry-After (Valkey)") {
+            val (service, api) = service()
+            service.migrations.migrate()
+            service.lifecycle.start()
+            try {
+                val target = "target-${UUID.randomUUID()}@nothingeats.dev"
+                repeat(10) {
+                    send("POST", "$api/v1/sessions", """{"email":"$target","password":"guess number $it"}""").statusCode() shouldBe 401
+                }
+
+                val blocked = send("POST", "$api/v1/sessions", """{"email":"$target","password":"guess number 11"}""")
+                blocked.statusCode() shouldBe 429
+                blocked.json()["code"]!!.jsonPrimitive.content shouldBe "TOO_MANY_ATTEMPTS"
+                (
+                    blocked
+                        .headers()
+                        .firstValue("Retry-After")
+                        .get()
+                        .toInt() in 1..900
+                ) shouldBe true
+            } finally {
+                service.lifecycle.stop()
+            }
+        }
+
+        test("bootstrap admins can look up accounts and grant roles; customers cannot") {
+            val (service, api) = service()
+            service.migrations.migrate()
+            service.lifecycle.start()
+            try {
+                val (_, boss) = registeredAndLoggedIn(api, email = "boss@nothingeats.dev")
+                val (ghost, customer) = registeredAndLoggedIn(api)
+                val bossToken = boss.json()["accessToken"]!!.jsonPrimitive.content
+                boss
+                    .json()["user"]!!
+                    .jsonObject["roles"]!!
+                    .jsonArray
+                    .map { it.jsonPrimitive.content } shouldBe listOf("admin", "customer")
+
+                val customerToken = customer.json()["accessToken"]!!.jsonPrimitive.content
+                send(
+                    "GET",
+                    "$api/v1/admin/users?email=$ghost",
+                    headers = mapOf("Authorization" to "Bearer $customerToken"),
+                ).statusCode() shouldBe
+                    403
+
+                val found = send("GET", "$api/v1/admin/users?email=$ghost", headers = mapOf("Authorization" to "Bearer $bossToken"))
+                found.statusCode() shouldBe 200
+                val ghostId = found.json()["id"]!!.jsonPrimitive.content
+                val granted =
+                    send("PUT", "$api/v1/admin/users/$ghostId/roles/admin", headers = mapOf("Authorization" to "Bearer $bossToken"))
+                granted.json()["roles"]!!.jsonArray.map { it.jsonPrimitive.content } shouldBe listOf("admin", "customer")
             } finally {
                 service.lifecycle.stop()
             }

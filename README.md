@@ -12,9 +12,13 @@ Identity & access for [NothingEats](https://github.com/slashncode/nothingeats): 
 | `POST` | `/v1/sessions/refresh` | cookie | New access token, rotated refresh cookie |
 | `DELETE` | `/v1/sessions/current` | cookie | Revokes the refresh token family, clears the cookie |
 | `GET` | `/v1/me` | Bearer | Profile of the caller |
+| `POST` | `/v1/password-resets` | – | `{email}` → `202`, same answer for every address; owners get a one-hour link |
+| `POST` | `/v1/password-resets/confirmations` | – | `{token, password}` → `204`; ends every session of the account, mails "password changed" |
+| `GET` | `/v1/admin/users?email=` | role `admin` | Look up an account |
+| `PUT`/`DELETE` | `/v1/admin/users/{id}/roles/{role}` | role `admin` | Grant or revoke a role (not your own `admin`); effective with the next access token |
 | `GET` | `/.well-known/jwks.json` | – | Public signing keys (current + next + recently retired) |
 
-Errors are RFC 9457 problems with stable codes, e.g. `INVALID_CREDENTIALS`, `EMAIL_NOT_VERIFIED`, `REFRESH_TOKEN_REUSED`.
+Errors are RFC 9457 problems with stable codes, e.g. `INVALID_CREDENTIALS`, `EMAIL_NOT_VERIFIED`, `REFRESH_TOKEN_REUSED`, `TOO_MANY_ATTEMPTS` (429 with `Retry-After`).
 
 ## Security design
 
@@ -23,6 +27,9 @@ Errors are RFC 9457 problems with stable codes, e.g. `INVALID_CREDENTIALS`, `EMA
 - **Access tokens**: RS256, 15 minutes, `iss`/`aud`/`sub`/`roles`/`locale`, verified by every service via JWKS.
 - **Refresh tokens**: 256-bit opaque, stored as SHA-256, `httpOnly; SameSite=Strict` cookie scoped to `/api/identity/v1/sessions`, rotated on every use. Presenting a used token revokes the whole token family.
 - **Signing keys**: RSA-2048 in Postgres, private keys AES-256-GCM encrypted with `KEYS__ENCRYPTION_KEY` (key id as authenticated data). Always a current and a next key; `cron rotate-signing-keys` retires, promotes and creates; retired keys stay published for an hour.
+- **Throttling** in Valkey (fixed windows, hashed keys, failing open): 30 logins per client address and 15 minutes, 10 failed logins per address (then locked for the window, even for the right password, so a 429 is no guessing oracle), 10 registrations and 10 reset requests per client and hour, 3 reset mails per address and hour. The client address is the one Traefik vouches for (last `X-Forwarded-For` entry).
+- **Password reset**: one-hour single-use link (hash stored), confirming it proves the address, ends every session and mails the owner.
+- **Admins**: addresses in `ADMIN__EMAILS` become admins when they verify or log in; admins grant further roles through the admin API.
 - **Events** through the transactional outbox: see [docs/events.md](docs/events.md).
 
 ## Run
@@ -32,6 +39,7 @@ Errors are RFC 9457 problems with stable codes, e.g. `INVALID_CREDENTIALS`, `EMA
 
 export DATABASE__URL=jdbc:postgresql://localhost:15432/identity DATABASE__USER=identity DATABASE__PASSWORD=...
 export KEYS__ENCRYPTION_KEY=$(openssl rand -base64 32)
+export VALKEY__PASSWORD=...   # the local cluster's Valkey on localhost:16379
 ./gradlew :app:run --args=migrate && ./gradlew :app:run
 ```
 

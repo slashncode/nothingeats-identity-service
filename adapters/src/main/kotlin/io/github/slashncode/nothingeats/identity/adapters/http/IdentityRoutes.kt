@@ -5,8 +5,11 @@ import io.github.slashncode.nothingeats.identity.application.GetProfile
 import io.github.slashncode.nothingeats.identity.application.GetPublicKeys
 import io.github.slashncode.nothingeats.identity.application.Login
 import io.github.slashncode.nothingeats.identity.application.Logout
+import io.github.slashncode.nothingeats.identity.application.ManageRoles
 import io.github.slashncode.nothingeats.identity.application.RefreshSession
 import io.github.slashncode.nothingeats.identity.application.RegisterUser
+import io.github.slashncode.nothingeats.identity.application.RequestPasswordReset
+import io.github.slashncode.nothingeats.identity.application.ResetPassword
 import io.github.slashncode.nothingeats.identity.application.Session
 import io.github.slashncode.nothingeats.identity.application.VerifyEmail
 import io.github.slashncode.nothingeats.identity.domain.User
@@ -14,7 +17,9 @@ import io.github.slashncode.nothingeats.platform.http.HttpRoutes
 import io.github.slashncode.nothingeats.platform.http.PlatformJson
 import io.github.slashncode.nothingeats.platform.http.auth.authenticated
 import io.github.slashncode.nothingeats.platform.http.auth.public
+import io.github.slashncode.nothingeats.platform.http.auth.requireRole
 import io.github.slashncode.nothingeats.platform.http.auth.user
+import io.github.slashncode.nothingeats.platform.http.clientAddress
 import io.ktor.http.CacheControl
 import io.ktor.http.ContentType
 import io.ktor.http.Cookie
@@ -29,6 +34,7 @@ import io.ktor.server.routing.Route
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
+import io.ktor.server.routing.put
 import io.ktor.server.routing.route
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
@@ -51,6 +57,17 @@ data class VerificationRequest(
 @Serializable
 data class LoginRequest(
     val email: String,
+    val password: String,
+)
+
+@Serializable
+data class PasswordResetRequest(
+    val email: String,
+)
+
+@Serializable
+data class PasswordResetConfirmation(
+    val token: String,
     val password: String,
 )
 
@@ -98,6 +115,9 @@ class IdentityRoutes(
     private val refresh: RefreshSession,
     private val logout: Logout,
     private val profile: GetProfile,
+    private val requestPasswordReset: RequestPasswordReset,
+    private val resetPassword: ResetPassword,
+    private val roles: ManageRoles,
     private val publicKeys: GetPublicKeys,
     private val cookie: RefreshCookieConfig,
     private val clock: Clock = Clock.systemUTC(),
@@ -121,7 +141,7 @@ class IdentityRoutes(
                 route("/v1") {
                     post("/registrations") {
                         val request = call.receive<RegistrationRequest>()
-                        registerUser(request.email, request.password, request.locale ?: call.request.acceptLanguage())
+                        registerUser(request.email, request.password, request.locale ?: call.request.acceptLanguage(), call.clientAddress)
                         call.respond(HttpStatusCode.Accepted, MessageResponse("Check your inbox to confirm your email address"))
                     }
                     post("/verifications") {
@@ -130,7 +150,7 @@ class IdentityRoutes(
                     }
                     post("/sessions") {
                         val request = call.receive<LoginRequest>()
-                        call.respondSession(login(request.email, request.password))
+                        call.respondSession(login(request.email, request.password, call.clientAddress))
                     }
                     post("/sessions/refresh") {
                         call.respondSession(refresh(call.request.cookies[cookie.name]))
@@ -140,10 +160,34 @@ class IdentityRoutes(
                         call.setRefreshCookie(value = "", maxAgeSeconds = 0)
                         call.respond(HttpStatusCode.NoContent)
                     }
+                    post("/password-resets") {
+                        requestPasswordReset(call.receive<PasswordResetRequest>().email, call.clientAddress)
+                        call.respond(HttpStatusCode.Accepted, MessageResponse("If the address has an account, a link is on its way"))
+                    }
+                    post("/password-resets/confirmations") {
+                        val request = call.receive<PasswordResetConfirmation>()
+                        resetPassword(request.token, request.password)
+                        call.respond(HttpStatusCode.NoContent)
+                    }
                 }
             }
             authenticated {
                 get("/v1/me") { call.respond(profile(call.user.id).toResponse()) }
+            }
+            requireRole("admin") {
+                route("/v1/admin/users") {
+                    get { call.respond(roles.find(call.request.queryParameters["email"].orEmpty()).toResponse()) }
+                    put("/{id}/roles/{role}") {
+                        call.respond(
+                            roles.grant(call.user.id, call.parameters["id"].orEmpty(), call.parameters["role"].orEmpty()).toResponse(),
+                        )
+                    }
+                    delete("/{id}/roles/{role}") {
+                        call.respond(
+                            roles.revoke(call.user.id, call.parameters["id"].orEmpty(), call.parameters["role"].orEmpty()).toResponse(),
+                        )
+                    }
+                }
             }
         }
     }
