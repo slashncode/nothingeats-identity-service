@@ -3,6 +3,7 @@ package io.github.slashncode.nothingeats.identity.application
 import io.github.slashncode.nothingeats.identity.domain.Email
 import io.github.slashncode.nothingeats.identity.domain.EmailAlreadyRegistered
 import io.github.slashncode.nothingeats.identity.domain.EmailVerification
+import io.github.slashncode.nothingeats.identity.domain.MagicLink
 import io.github.slashncode.nothingeats.identity.domain.PasswordReset
 import io.github.slashncode.nothingeats.identity.domain.RefreshToken
 import io.github.slashncode.nothingeats.identity.domain.User
@@ -31,6 +32,59 @@ class InMemoryUsers : Users {
     override suspend fun findById(id: UserId) = all[id]
 
     override suspend fun findByEmail(email: Email) = all.values.firstOrNull { it.email == email }
+
+    var tokens: InMemoryRefreshTokens? = null
+
+    override suspend fun delete(id: UserId) {
+        all.remove(id)
+        tokens?.all?.values?.removeIf { it.userId == id }
+    }
+}
+
+class InMemoryMagicLinks : MagicLinks {
+    val all = ConcurrentHashMap<String, MagicLink>()
+
+    override suspend fun add(link: MagicLink) {
+        all[link.tokenHash] = link
+    }
+
+    override suspend fun find(tokenHash: String) = all[tokenHash]
+
+    override suspend fun markUsed(
+        tokenHash: String,
+        now: Instant,
+    ): Boolean {
+        var claimed = false
+        all.computeIfPresent(tokenHash) { _, link ->
+            if (link.usedAt == null) {
+                claimed = true
+                link.copy(usedAt = now)
+            } else {
+                link
+            }
+        }
+        return claimed
+    }
+}
+
+class InMemoryErasures : Erasures {
+    val all = ConcurrentHashMap<UserId, Pair<Instant, Instant?>>()
+
+    override suspend fun add(
+        userId: UserId,
+        now: Instant,
+    ) {
+        all[userId] = now to null
+    }
+
+    override suspend fun pendingAnalytics(limit: Int) = all.filterValues { it.second == null }.keys.take(limit)
+
+    override suspend fun markAnalyticsErased(
+        userId: UserId,
+        now: Instant,
+    ) {
+        all.computeIfPresent(userId) { _, (deletedAt, _) -> deletedAt to now }
+    }
 }
 
 class InMemoryEmailVerifications : EmailVerifications {
@@ -114,6 +168,15 @@ class InMemoryRefreshTokens : RefreshTokens {
     ) {
         all.replaceAll { _, t -> if (t.userId == userId && t.revokedAt == null) t.copy(revokedAt = now) else t }
     }
+
+    override suspend fun countActive(
+        userId: UserId,
+        now: Instant,
+    ) = all.values
+        .filter { it.userId == userId && !it.wasAlreadyUsed && !it.isExpired(now) }
+        .map { it.familyId }
+        .distinct()
+        .size
 }
 
 /** Not a real hash: fast and readable, with a switch to simulate outdated parameters. */
@@ -166,6 +229,20 @@ class RecordingUserEvents : UserEvents {
 
     override suspend fun passwordChanged(user: User) {
         events += "password-changed:${user.email}"
+    }
+
+    var lastMagicToken: String? = null
+
+    override suspend fun magicLinkRequested(
+        user: User,
+        token: String,
+    ) {
+        events += "magic-link:${user.email}"
+        lastMagicToken = token
+    }
+
+    override suspend fun deleted(userId: UserId) {
+        events += "deleted:$userId"
     }
 }
 

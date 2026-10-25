@@ -16,7 +16,9 @@ import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldContain
+import io.kotest.matchers.string.shouldNotContain
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -102,6 +104,20 @@ class IdentityFlowTest :
                 }
             }
             error("No $type event for $email")
+        }
+
+        fun deletedEvent(userId: String): JsonObject {
+            KafkaClients.consumer(KafkaConfig(KafkaTestCluster.bootstrapServers), "test-${UUID.randomUUID()}").use { consumer ->
+                consumer.subscribe(listOf(TOPIC))
+                val deadline = System.currentTimeMillis() + 20_000
+                while (System.currentTimeMillis() < deadline) {
+                    for (record in consumer.poll(Duration.ofMillis(250))) {
+                        val event = EventJson.decodeFromString(CloudEvent.serializer(), record.value().decodeToString())
+                        if (event.type == "nothingeats.identity.user.deleted.v1" && event.subject == userId) return event.data.jsonObject
+                    }
+                }
+            }
+            error("No deleted event for $userId")
         }
 
         /** The verification token as the notification service will read it: from the event on Kafka. */
@@ -270,6 +286,68 @@ class IdentityFlowTest :
                 val granted =
                     send("PUT", "$api/v1/admin/users/$ghostId/roles/admin", headers = mapOf("Authorization" to "Bearer $bossToken"))
                 granted.json()["roles"]!!.jsonArray.map { it.jsonPrimitive.content } shouldBe listOf("admin", "customer")
+            } finally {
+                service.lifecycle.stop()
+            }
+        }
+
+        test("magic link: mailed token logs in with a session cookie") {
+            val (service, api) = service()
+            service.migrations.migrate()
+            service.lifecycle.start()
+            try {
+                val (email, _) = registeredAndLoggedIn(api)
+
+                send("POST", "$api/v1/magic-links", """{"email":"$email"}""").statusCode() shouldBe 202
+                val token = tokenFromEvent(email, "nothingeats.identity.user.magic-link-requested.v1", "magicToken")
+                val login = send("POST", "$api/v1/magic-links/sessions", """{"token":"$token"}""")
+
+                login.statusCode() shouldBe 200
+                login.refreshCookie() shouldContain "ne_refresh="
+                send("POST", "$api/v1/magic-links/sessions", """{"token":"$token"}""").statusCode() shouldBe 401
+            } finally {
+                service.lifecycle.stop()
+            }
+        }
+
+        test("export, consent, then deletion: only the id survives, as tombstone and event") {
+            val (service, api) = service()
+            service.migrations.migrate()
+            service.lifecycle.start()
+            try {
+                val (email, login) = registeredAndLoggedIn(api)
+                val auth = mapOf("Authorization" to "Bearer ${login.json()["accessToken"]!!.jsonPrimitive.content}")
+                val userId =
+                    login
+                        .json()["user"]!!
+                        .jsonObject["id"]!!
+                        .jsonPrimitive.content
+
+                send(
+                    "PUT",
+                    "$api/v1/me/consent",
+                    """{"analytics":true}""",
+                    auth,
+                ).json()["analyticsConsent"]!!.jsonPrimitive.content shouldBe
+                    "true"
+                val export = send("GET", "$api/v1/me/export", headers = auth)
+                export.headers().firstValue("Content-Disposition").get() shouldContain "attachment"
+                export
+                    .json()["account"]!!
+                    .jsonObject["email"]!!
+                    .jsonPrimitive.content shouldBe email
+                export.json()["activeSessions"]!!.jsonPrimitive.content shouldBe "1"
+                export.body() shouldNotContain "password_hash"
+
+                send("POST", "$api/v1/me/deletion", """{"password":"wrong password!!"}""", auth).statusCode() shouldBe 403
+                send("POST", "$api/v1/me/deletion", """{"password":"correct horse battery"}""", auth).statusCode() shouldBe 204
+
+                send("POST", "$api/v1/sessions", """{"email":"$email","password":"correct horse battery"}""").statusCode() shouldBe 401
+                send("POST", "$api/v1/sessions/refresh", headers = mapOf("Cookie" to login.refreshCookie())).statusCode() shouldBe 401
+                deletedEvent(userId).keys shouldBe setOf("userId")
+
+                // No PostHog personal API key in tests: the tombstone waits for the next run.
+                service.cronTasks.single { it.name == "erase-analytics" }.run()
             } finally {
                 service.lifecycle.stop()
             }

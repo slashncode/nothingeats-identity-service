@@ -82,7 +82,7 @@ class Login(
                 if (current != user) users.save(current)
                 sessions.issue(current)
             }
-        analytics.capture("user_logged_in", distinctId = user.id.toString())
+        analytics.capture("user_logged_in", mapOf("method" to "password"), distinctId = user.id.toString())
         return session
     }
 }

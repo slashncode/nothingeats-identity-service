@@ -2,6 +2,7 @@ package io.github.slashncode.nothingeats.identity.application
 
 import io.github.slashncode.nothingeats.identity.domain.Email
 import io.github.slashncode.nothingeats.identity.domain.EmailVerification
+import io.github.slashncode.nothingeats.identity.domain.MagicLink
 import io.github.slashncode.nothingeats.identity.domain.PasswordReset
 import io.github.slashncode.nothingeats.identity.domain.RefreshToken
 import io.github.slashncode.nothingeats.identity.domain.User
@@ -19,6 +20,36 @@ interface Users {
     suspend fun findById(id: UserId): User?
 
     suspend fun findByEmail(email: Email): User?
+
+    /** Removes the account; its tokens go with it (foreign keys cascade). */
+    suspend fun delete(id: UserId)
+}
+
+interface MagicLinks {
+    suspend fun add(link: MagicLink)
+
+    suspend fun find(tokenHash: String): MagicLink?
+
+    /** Atomically marks the link used; false if it was used already. */
+    suspend fun markUsed(
+        tokenHash: String,
+        now: Instant,
+    ): Boolean
+}
+
+/** Deleted accounts whose data outside this database still has to be erased. */
+interface Erasures {
+    suspend fun add(
+        userId: UserId,
+        now: Instant,
+    )
+
+    suspend fun pendingAnalytics(limit: Int): List<UserId>
+
+    suspend fun markAnalyticsErased(
+        userId: UserId,
+        now: Instant,
+    )
 }
 
 interface EmailVerifications {
@@ -65,6 +96,12 @@ interface RefreshTokens {
         userId: UserId,
         now: Instant,
     )
+
+    /** Sessions (token families) that can still be refreshed. */
+    suspend fun countActive(
+        userId: UserId,
+        now: Instant,
+    ): Int
 }
 
 data class PasswordCheck(
@@ -126,6 +163,14 @@ interface UserEvents {
     )
 
     suspend fun passwordChanged(user: User)
+
+    suspend fun magicLinkRequested(
+        user: User,
+        token: String,
+    )
+
+    /** Carries only the id: every service erases what it holds about it. */
+    suspend fun deleted(userId: UserId)
 }
 
 interface Transactions {

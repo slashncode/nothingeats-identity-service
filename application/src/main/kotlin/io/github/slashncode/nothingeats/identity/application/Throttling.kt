@@ -32,6 +32,13 @@ object ThrottleRules {
 
     /** Caps the mails one address can receive, whoever asks for them. */
     val PASSWORD_RESET_PER_ACCOUNT = ThrottleRule("password-reset-account", limit = 3, window = 1.hours)
+
+    val MAGIC_LINK_PER_CLIENT = ThrottleRule("magic-link-client", limit = 10, window = 1.hours)
+
+    val MAGIC_LINK_PER_ACCOUNT = ThrottleRule("magic-link-account", limit = 5, window = 1.hours)
+
+    /** Account deletion asks for the password again; guessing it is as limited as logging in. */
+    val DELETION_FAILURES_PER_ACCOUNT = ThrottleRule("deletion-account", limit = 5, window = 15.minutes)
 }
 
 interface Throttle {

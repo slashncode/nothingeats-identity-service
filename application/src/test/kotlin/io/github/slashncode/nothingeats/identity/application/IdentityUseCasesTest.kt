@@ -3,6 +3,7 @@ package io.github.slashncode.nothingeats.identity.application
 import io.github.slashncode.nothingeats.identity.domain.Email
 import io.github.slashncode.nothingeats.identity.domain.Locale
 import io.github.slashncode.nothingeats.identity.domain.Role
+import io.github.slashncode.nothingeats.platform.core.analytics.ErasureResult
 import io.github.slashncode.nothingeats.platform.core.error.AppError
 import io.github.slashncode.nothingeats.platform.testing.RecordingAnalytics
 import io.kotest.assertions.throwables.shouldThrow
@@ -48,6 +49,19 @@ private class Identity(
     val requestReset = RequestPasswordReset(users, resets, events, tx, secrets, clock, analytics, throttle)
     val resetPassword = ResetPassword(users, resets, refreshTokens, hasher, events, tx, clock, analytics)
     val roles = ManageRoles(users, analytics)
+    val magicLinks = InMemoryMagicLinks()
+    val erasures = InMemoryErasures()
+    val requestMagicLink = RequestMagicLink(users, magicLinks, events, tx, secrets, clock, throttle)
+    val loginWithMagicLink = LoginWithMagicLink(users, magicLinks, sessions, tx, clock, analytics, admins)
+    val export = ExportAccount(users, refreshTokens, clock)
+    val deleteAccount = DeleteAccount(users, hasher, erasures, events, tx, clock, throttle)
+    val setConsent = SetAnalyticsConsent(users, clock)
+    val eraseAnalytics = EraseAnalyticsData(erasures, analytics, clock)
+
+    init {
+        users.tokens = refreshTokens
+    }
+
     val refresh = RefreshSession(users, refreshTokens, sessions, tx, clock, analytics)
     val logout = Logout(refreshTokens, clock)
 
@@ -302,5 +316,76 @@ class IdentityUseCasesTest :
             shouldThrow<AppError.NotFound> { identity.roles.grant(boss.id.toString(), ghost.id.toString(), "superuser") }
             shouldThrow<AppError.NotFound> { identity.roles.find("nobody@nothingeats.dev") }
             identity.analytics.events.map { it.name } shouldContainAll listOf("role_granted", "role_revoked")
+        }
+
+        test("magic link: same answer for every address, one use, logs in and verifies") {
+            val identity = Identity()
+            identity.register("late@nothingeats.dev", "correct horse battery", "de", CLIENT)
+
+            identity.requestMagicLink("nobody@nothingeats.dev", CLIENT)
+            identity.events.events.none { it.startsWith("magic-link") } shouldBe true
+
+            identity.requestMagicLink("late@nothingeats.dev", CLIENT)
+            val token = identity.events.lastMagicToken!!
+            val session = identity.loginWithMagicLink(token)
+
+            session.user.isVerified shouldBe true
+            identity.analytics.events
+                .last()
+                .properties["method"] shouldBe "magic_link"
+            shouldThrow<AppError.Unauthenticated> { identity.loginWithMagicLink(token) }.code.value shouldBe "MAGIC_LINK_INVALID"
+
+            identity.requestMagicLink("late@nothingeats.dev", CLIENT)
+            identity.now = identity.now.plus(16, ChronoUnit.MINUTES)
+            shouldThrow<AppError.Unauthenticated> { identity.loginWithMagicLink(identity.events.lastMagicToken!!) }
+        }
+
+        test("export holds the account, consent and active sessions, but no secrets") {
+            val identity = Identity()
+            identity.verifiedUser()
+            val session = identity.login("ghost@nothingeats.dev", "correct horse battery", CLIENT)
+            identity.login("ghost@nothingeats.dev", "correct horse battery", CLIENT)
+            identity.setConsent(session.user.id.toString(), granted = true)
+
+            val export = identity.export(session.user.id.toString())
+
+            export.user.email.value shouldBe "ghost@nothingeats.dev"
+            export.user.analyticsConsent shouldBe true
+            export.activeSessions shouldBe 2
+        }
+
+        test("deletion needs the password, removes everything, and leaves only the id for erasure") {
+            val identity = Identity()
+            identity.verifiedUser()
+            val session = identity.login("ghost@nothingeats.dev", "correct horse battery", CLIENT)
+            val id = session.user.id
+
+            shouldThrow<AppError.Forbidden> { identity.deleteAccount(id.toString(), "wrong password!!") }.code.value shouldBe
+                "PASSWORD_CONFIRMATION_FAILED"
+            identity.deleteAccount(id.toString(), "correct horse battery")
+
+            identity.users.all shouldBe emptyMap()
+            identity.refreshTokens.all shouldBe emptyMap()
+            identity.erasures.all.keys shouldBe setOf(id)
+            identity.events.events.last() shouldBe "deleted:$id"
+            shouldThrow<AppError.Unauthenticated> { identity.refresh(session.refreshToken) }
+        }
+
+        test("analytics erasure waits without a key, retries failures, and finishes once") {
+            val identity = Identity()
+            identity.verifiedUser()
+            val id = identity.login("ghost@nothingeats.dev", "correct horse battery", CLIENT).user.id
+            identity.deleteAccount(id.toString(), "correct horse battery")
+
+            identity.analytics.erasure = { ErasureResult.NOT_CONFIGURED }
+            identity.eraseAnalytics() shouldBe ErasureRun(erased = 0, failed = 0, waiting = 1)
+
+            identity.analytics.erasure = { error("PostHog is down") }
+            identity.eraseAnalytics() shouldBe ErasureRun(erased = 0, failed = 1, waiting = 0)
+
+            identity.analytics.erasure = { ErasureResult.ERASED }
+            identity.eraseAnalytics() shouldBe ErasureRun(erased = 1, failed = 0, waiting = 0)
+            identity.eraseAnalytics() shouldBe ErasureRun(erased = 0, failed = 0, waiting = 0)
+            identity.analytics.erased shouldBe listOf(id.toString())
         }
     })

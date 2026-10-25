@@ -23,6 +23,16 @@ data class PasswordReset(
     fun isUsable(now: Instant) = usedAt == null && now.isBefore(expiresAt)
 }
 
+/** A one-time login link (passwordless); like the other mailed tokens, only the hash is stored. */
+data class MagicLink(
+    val tokenHash: String,
+    val userId: UserId,
+    val expiresAt: Instant,
+    val usedAt: Instant?,
+) {
+    fun isUsable(now: Instant) = usedAt == null && now.isBefore(expiresAt)
+}
+
 /**
  * An opaque refresh token, stored hashed. Every refresh replaces it with a new token of the same
  * [familyId]. A token that is presented again after it was used means it was stolen: the whole

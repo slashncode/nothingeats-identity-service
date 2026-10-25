@@ -1,5 +1,6 @@
 package io.github.slashncode.nothingeats.identity.app
 
+import io.github.slashncode.nothingeats.identity.adapters.cron.EraseAnalyticsTask
 import io.github.slashncode.nothingeats.identity.adapters.cron.RotateSigningKeysTask
 import io.github.slashncode.nothingeats.identity.adapters.crypto.Argon2PasswordHasher
 import io.github.slashncode.nothingeats.identity.adapters.crypto.JwtAccessTokens
@@ -9,6 +10,8 @@ import io.github.slashncode.nothingeats.identity.adapters.crypto.SecureRandomSec
 import io.github.slashncode.nothingeats.identity.adapters.http.IdentityRoutes
 import io.github.slashncode.nothingeats.identity.adapters.messaging.OutboxUserEvents
 import io.github.slashncode.nothingeats.identity.adapters.persistence.ExposedEmailVerifications
+import io.github.slashncode.nothingeats.identity.adapters.persistence.ExposedErasures
+import io.github.slashncode.nothingeats.identity.adapters.persistence.ExposedMagicLinks
 import io.github.slashncode.nothingeats.identity.adapters.persistence.ExposedPasswordResets
 import io.github.slashncode.nothingeats.identity.adapters.persistence.ExposedRefreshTokens
 import io.github.slashncode.nothingeats.identity.adapters.persistence.ExposedTransactions
@@ -16,21 +19,29 @@ import io.github.slashncode.nothingeats.identity.adapters.persistence.ExposedUse
 import io.github.slashncode.nothingeats.identity.adapters.throttle.ValkeyThrottle
 import io.github.slashncode.nothingeats.identity.application.AccessTokens
 import io.github.slashncode.nothingeats.identity.application.AdminBootstrap
+import io.github.slashncode.nothingeats.identity.application.DeleteAccount
 import io.github.slashncode.nothingeats.identity.application.EmailVerifications
+import io.github.slashncode.nothingeats.identity.application.EraseAnalyticsData
+import io.github.slashncode.nothingeats.identity.application.Erasures
+import io.github.slashncode.nothingeats.identity.application.ExportAccount
 import io.github.slashncode.nothingeats.identity.application.GetProfile
 import io.github.slashncode.nothingeats.identity.application.GetPublicKeys
 import io.github.slashncode.nothingeats.identity.application.Login
+import io.github.slashncode.nothingeats.identity.application.LoginWithMagicLink
 import io.github.slashncode.nothingeats.identity.application.Logout
+import io.github.slashncode.nothingeats.identity.application.MagicLinks
 import io.github.slashncode.nothingeats.identity.application.ManageRoles
 import io.github.slashncode.nothingeats.identity.application.PasswordHasher
 import io.github.slashncode.nothingeats.identity.application.PasswordResets
 import io.github.slashncode.nothingeats.identity.application.RefreshSession
 import io.github.slashncode.nothingeats.identity.application.RefreshTokens
 import io.github.slashncode.nothingeats.identity.application.RegisterUser
+import io.github.slashncode.nothingeats.identity.application.RequestMagicLink
 import io.github.slashncode.nothingeats.identity.application.RequestPasswordReset
 import io.github.slashncode.nothingeats.identity.application.ResetPassword
 import io.github.slashncode.nothingeats.identity.application.Secrets
 import io.github.slashncode.nothingeats.identity.application.SessionIssuer
+import io.github.slashncode.nothingeats.identity.application.SetAnalyticsConsent
 import io.github.slashncode.nothingeats.identity.application.SigningKeys
 import io.github.slashncode.nothingeats.identity.application.Throttle
 import io.github.slashncode.nothingeats.identity.application.Transactions
@@ -87,6 +98,7 @@ abstract class ServiceComponent(
     abstract val lifecycle: LifecycleManager
     abstract val migrations: FlywayMigrations
     abstract val signingKeys: SigningKeys
+    abstract val cronTasks: Set<CronTask>
 
     // Platform
 
@@ -237,6 +249,20 @@ abstract class ServiceComponent(
     fun adminBootstrap(): AdminBootstrap = AdminBootstrap(config.admin.emails)
 
     @Provides
+    fun magicLinks(postgres: PostgresDatabase): MagicLinks = ExposedMagicLinks(postgres)
+
+    @Provides
+    fun erasures(postgres: PostgresDatabase): Erasures = ExposedErasures(postgres)
+
+    @IntoSet
+    @Provides
+    fun eraseAnalytics(
+        erasures: Erasures,
+        analytics: ProductAnalytics,
+        clock: Clock,
+    ): CronTask = EraseAnalyticsTask(EraseAnalyticsData(erasures, analytics, clock))
+
+    @Provides
     fun transactions(postgres: PostgresDatabase): Transactions = ExposedTransactions(postgres)
 
     @ServiceScope
@@ -356,6 +382,16 @@ abstract class ServiceComponent(
         requestPasswordReset: RequestPasswordReset,
         resetPassword: ResetPassword,
         analytics: ProductAnalytics,
+        magicLinks: MagicLinks,
+        events: UserEvents,
+        transactions: Transactions,
+        secrets: Secrets,
+        throttle: Throttle,
+        sessions: SessionIssuer,
+        admins: AdminBootstrap,
+        refreshTokens: RefreshTokens,
+        hasher: PasswordHasher,
+        erasures: Erasures,
     ): HttpRoutes =
         IdentityRoutes(
             registerUser,
@@ -367,6 +403,11 @@ abstract class ServiceComponent(
             requestPasswordReset,
             resetPassword,
             ManageRoles(users, analytics),
+            RequestMagicLink(users, magicLinks, events, transactions, secrets, clock, throttle),
+            LoginWithMagicLink(users, magicLinks, sessions, transactions, clock, analytics, admins),
+            ExportAccount(users, refreshTokens, clock),
+            DeleteAccount(users, hasher, erasures, events, transactions, clock, throttle),
+            SetAnalyticsConsent(users, clock),
             GetPublicKeys(keys),
             config.cookie,
             clock,

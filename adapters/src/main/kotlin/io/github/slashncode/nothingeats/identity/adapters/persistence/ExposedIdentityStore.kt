@@ -1,6 +1,8 @@
 package io.github.slashncode.nothingeats.identity.adapters.persistence
 
 import io.github.slashncode.nothingeats.identity.application.EmailVerifications
+import io.github.slashncode.nothingeats.identity.application.Erasures
+import io.github.slashncode.nothingeats.identity.application.MagicLinks
 import io.github.slashncode.nothingeats.identity.application.PasswordResets
 import io.github.slashncode.nothingeats.identity.application.RefreshTokens
 import io.github.slashncode.nothingeats.identity.application.Transactions
@@ -9,6 +11,7 @@ import io.github.slashncode.nothingeats.identity.domain.Email
 import io.github.slashncode.nothingeats.identity.domain.EmailAlreadyRegistered
 import io.github.slashncode.nothingeats.identity.domain.EmailVerification
 import io.github.slashncode.nothingeats.identity.domain.Locale
+import io.github.slashncode.nothingeats.identity.domain.MagicLink
 import io.github.slashncode.nothingeats.identity.domain.PasswordReset
 import io.github.slashncode.nothingeats.identity.domain.RefreshToken
 import io.github.slashncode.nothingeats.identity.domain.Role
@@ -22,10 +25,13 @@ import org.jetbrains.exposed.v1.core.ResultRow
 import org.jetbrains.exposed.v1.core.Table
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.greater
 import org.jetbrains.exposed.v1.core.isNull
 import org.jetbrains.exposed.v1.core.statements.UpdateBuilder
 import org.jetbrains.exposed.v1.javatime.timestamp
+import org.jetbrains.exposed.v1.jdbc.deleteWhere
 import org.jetbrains.exposed.v1.jdbc.insert
+import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.update
 import java.time.Instant
@@ -40,10 +46,29 @@ internal object UsersTable : Table("users") {
     val status = text("status")
     val createdAt = timestamp("created_at")
     val verifiedAt = timestamp("verified_at").nullable()
+    val analyticsConsent = bool("analytics_consent").nullable()
+    val consentUpdatedAt = timestamp("consent_updated_at").nullable()
 
     override val primaryKey = PrimaryKey(id)
 
     const val EMAIL_UNIQUE = "users_email_key"
+}
+
+internal object MagicLinksTable : Table("magic_links") {
+    val tokenHash = text("token_hash")
+    val userId = uuid("user_id")
+    val expiresAt = timestamp("expires_at")
+    val usedAt = timestamp("used_at").nullable()
+
+    override val primaryKey = PrimaryKey(tokenHash)
+}
+
+internal object ErasuresTable : Table("erasures") {
+    val userId = uuid("user_id")
+    val deletedAt = timestamp("deleted_at")
+    val analyticsErasedAt = timestamp("analytics_erased_at").nullable()
+
+    override val primaryKey = PrimaryKey(userId)
 }
 
 internal object EmailVerificationsTable : Table("email_verifications") {
@@ -116,6 +141,10 @@ class ExposedUsers(
                 ?.toUser()
         }
 
+    override suspend fun delete(id: UserId) {
+        db.transaction { UsersTable.deleteWhere { UsersTable.id eq id.value } }
+    }
+
     private fun UpdateBuilder<*>.fill(user: User) {
         this[UsersTable.id] = user.id.value
         this[UsersTable.email] = user.email.value
@@ -125,6 +154,8 @@ class ExposedUsers(
         this[UsersTable.status] = user.status.name
         this[UsersTable.createdAt] = user.createdAt
         this[UsersTable.verifiedAt] = user.verifiedAt
+        this[UsersTable.analyticsConsent] = user.analyticsConsent
+        this[UsersTable.consentUpdatedAt] = user.consentUpdatedAt
     }
 
     private fun ResultRow.toUser() =
@@ -141,6 +172,8 @@ class ExposedUsers(
             status = UserStatus.valueOf(this[UsersTable.status]),
             createdAt = this[UsersTable.createdAt],
             verifiedAt = this[UsersTable.verifiedAt],
+            analyticsConsent = this[UsersTable.analyticsConsent],
+            consentUpdatedAt = this[UsersTable.consentUpdatedAt],
         )
 }
 
@@ -226,6 +259,82 @@ class ExposedPasswordResets(
         }
 }
 
+class ExposedMagicLinks(
+    private val db: PostgresDatabase,
+) : MagicLinks {
+    override suspend fun add(link: MagicLink) {
+        db.transaction {
+            MagicLinksTable.insert {
+                it[tokenHash] = link.tokenHash
+                it[userId] = link.userId.value
+                it[expiresAt] = link.expiresAt
+                it[usedAt] = link.usedAt
+            }
+        }
+    }
+
+    override suspend fun find(tokenHash: String): MagicLink? =
+        db.transaction(readOnly = true) {
+            MagicLinksTable
+                .selectAll()
+                .where { MagicLinksTable.tokenHash eq tokenHash }
+                .singleOrNull()
+                ?.let {
+                    MagicLink(
+                        tokenHash = it[MagicLinksTable.tokenHash],
+                        userId = UserId(it[MagicLinksTable.userId]),
+                        expiresAt = it[MagicLinksTable.expiresAt],
+                        usedAt = it[MagicLinksTable.usedAt],
+                    )
+                }
+        }
+
+    override suspend fun markUsed(
+        tokenHash: String,
+        now: Instant,
+    ): Boolean =
+        db.transaction {
+            MagicLinksTable.update({ (MagicLinksTable.tokenHash eq tokenHash) and MagicLinksTable.usedAt.isNull() }) {
+                it[usedAt] = now
+            } == 1
+        }
+}
+
+class ExposedErasures(
+    private val db: PostgresDatabase,
+) : Erasures {
+    override suspend fun add(
+        userId: UserId,
+        now: Instant,
+    ) {
+        db.transaction {
+            ErasuresTable.insert {
+                it[ErasuresTable.userId] = userId.value
+                it[deletedAt] = now
+            }
+        }
+    }
+
+    override suspend fun pendingAnalytics(limit: Int): List<UserId> =
+        db.transaction(readOnly = true) {
+            ErasuresTable
+                .selectAll()
+                .where { ErasuresTable.analyticsErasedAt.isNull() }
+                .orderBy(ErasuresTable.deletedAt)
+                .limit(limit)
+                .map { UserId(it[ErasuresTable.userId]) }
+        }
+
+    override suspend fun markAnalyticsErased(
+        userId: UserId,
+        now: Instant,
+    ) {
+        db.transaction {
+            ErasuresTable.update({ ErasuresTable.userId eq userId.value }) { it[analyticsErasedAt] = now }
+        }
+    }
+}
+
 class ExposedRefreshTokens(
     private val db: PostgresDatabase,
 ) : RefreshTokens {
@@ -294,4 +403,19 @@ class ExposedRefreshTokens(
             }
         }
     }
+
+    override suspend fun countActive(
+        userId: UserId,
+        now: Instant,
+    ): Int =
+        db.transaction(readOnly = true) {
+            RefreshTokensTable
+                .select(RefreshTokensTable.familyId)
+                .where {
+                    (RefreshTokensTable.userId eq userId.value) and RefreshTokensTable.usedAt.isNull() and
+                        RefreshTokensTable.revokedAt.isNull() and (RefreshTokensTable.expiresAt greater now)
+                }.withDistinct()
+                .count()
+                .toInt()
+        }
 }

@@ -66,6 +66,9 @@ data class User(
     val status: UserStatus,
     val createdAt: Instant,
     val verifiedAt: Instant?,
+    /** Product analytics consent as decided in the web app; null until decided. */
+    val analyticsConsent: Boolean? = null,
+    val consentUpdatedAt: Instant? = null,
 ) {
     val isVerified: Boolean get() = status == UserStatus.ACTIVE
 
@@ -76,6 +79,11 @@ data class User(
     fun withRole(role: Role) = copy(roles = roles + role)
 
     fun withoutRole(role: Role) = copy(roles = roles - role)
+
+    fun withAnalyticsConsent(
+        granted: Boolean,
+        now: Instant,
+    ) = if (analyticsConsent == granted) this else copy(analyticsConsent = granted, consentUpdatedAt = now)
 
     companion object {
         fun register(
