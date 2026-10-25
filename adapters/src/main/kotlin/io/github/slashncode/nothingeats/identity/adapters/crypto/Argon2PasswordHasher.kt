@@ -3,6 +3,8 @@ package io.github.slashncode.nothingeats.identity.adapters.crypto
 import io.github.slashncode.nothingeats.identity.application.PasswordCheck
 import io.github.slashncode.nothingeats.identity.application.PasswordHasher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.bouncycastle.crypto.generators.Argon2BytesGenerator
 import org.bouncycastle.crypto.params.Argon2Parameters
@@ -17,6 +19,9 @@ data class Argon2Settings(
     val parallelism: Int = 1,
 )
 
+/** Hashes at once; each holds [Argon2Settings.memoryKib] of heap, so a burst must queue, not pile up. */
+private const val MAX_CONCURRENT_HASHES = 4
+
 /**
  * Argon2id in pure Java (BouncyCastle, no native library in the image), stored in the standard PHC
  * format `$argon2id$v=19$m=…,t=…,p=…$salt$hash` so the parameters travel with every hash.
@@ -27,19 +32,22 @@ class Argon2PasswordHasher(
     private val random = SecureRandom()
     private val encoder = Base64.getEncoder().withoutPadding()
     private val decoder = Base64.getDecoder()
+    private val permits = Semaphore(MAX_CONCURRENT_HASHES)
 
     override val dummyHash: String = hashBlocking(encoder.encodeToString(ByteArray(SALT_BYTES).also(random::nextBytes)))
 
-    override suspend fun hash(password: String): String = withContext(Dispatchers.Default) { hashBlocking(password) }
+    override suspend fun hash(password: String): String = permits.withPermit { withContext(Dispatchers.Default) { hashBlocking(password) } }
 
     override suspend fun verify(
         password: String,
         hash: String,
     ): PasswordCheck =
-        withContext(Dispatchers.Default) {
-            val parsed = parse(hash) ?: return@withContext PasswordCheck(matches = false, needsRehash = false)
-            val actual = derive(password, parsed.salt, parsed.settings, parsed.hash.size)
-            PasswordCheck(matches = MessageDigest.isEqual(actual, parsed.hash), needsRehash = parsed.settings != settings)
+        permits.withPermit {
+            withContext(Dispatchers.Default) {
+                val parsed = parse(hash) ?: return@withContext PasswordCheck(matches = false, needsRehash = false)
+                val actual = derive(password, parsed.salt, parsed.settings, parsed.hash.size)
+                PasswordCheck(matches = MessageDigest.isEqual(actual, parsed.hash), needsRehash = parsed.settings != settings)
+            }
         }
 
     private fun hashBlocking(password: String): String {
