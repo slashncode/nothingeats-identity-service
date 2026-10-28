@@ -8,6 +8,7 @@ import io.github.slashncode.nothingeats.identity.domain.Locale
 import io.github.slashncode.nothingeats.identity.domain.PasswordPolicy
 import io.github.slashncode.nothingeats.identity.domain.User
 import io.github.slashncode.nothingeats.identity.domain.WeakPassword
+import io.github.slashncode.nothingeats.platform.core.analytics.AnalyticsContext
 import io.github.slashncode.nothingeats.platform.core.analytics.ProductAnalytics
 import io.github.slashncode.nothingeats.platform.core.error.AppError
 import io.github.slashncode.nothingeats.platform.core.error.ErrorCode
@@ -64,7 +65,13 @@ class RegisterUser(
             users.findByEmail(address)?.let { winner -> transactions.run { events.registrationAttempted(winner) } }
             return
         }
-        analytics.capture("user_signed_up", mapOf("locale" to user.locale.tag), distinctId = user.id.toString())
+        if (AnalyticsContext.consented()) {
+            analytics.capture(
+                "user_signed_up",
+                mapOf("locale" to user.locale.tag),
+                distinctId = user.id.toString(),
+            )
+        }
     }
 }
 
@@ -90,7 +97,7 @@ class VerifyEmail(
                     events.verified(verified)
                 }
             }
-        analytics.capture("email_verified", distinctId = user.id.toString())
+        if (AnalyticsContext.consented()) analytics.capture("email_verified", distinctId = user.id.toString())
     }
 
     private fun invalidToken() = AppError.Invalid(ErrorCode("VERIFICATION_TOKEN_INVALID"), "The link is invalid or has expired")

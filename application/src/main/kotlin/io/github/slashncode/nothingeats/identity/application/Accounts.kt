@@ -5,6 +5,7 @@ import io.github.slashncode.nothingeats.identity.domain.PasswordReset
 import io.github.slashncode.nothingeats.identity.domain.Role
 import io.github.slashncode.nothingeats.identity.domain.User
 import io.github.slashncode.nothingeats.identity.domain.UserId
+import io.github.slashncode.nothingeats.platform.core.analytics.AnalyticsContext
 import io.github.slashncode.nothingeats.platform.core.analytics.ProductAnalytics
 import io.github.slashncode.nothingeats.platform.core.error.AppError
 import io.github.slashncode.nothingeats.platform.core.error.ErrorCode
@@ -61,7 +62,7 @@ class RequestPasswordReset(
             resets.add(PasswordReset(TokenHashing.hash(token), user.id, clock.instant().plus(ttl.toJavaDuration()), usedAt = null))
             events.passwordResetRequested(user, token)
         }
-        analytics.capture("password_reset_requested", distinctId = user.id.toString())
+        if (AnalyticsContext.consented()) analytics.capture("password_reset_requested", distinctId = user.id.toString())
     }
 }
 
@@ -98,7 +99,7 @@ class ResetPassword(
                     events.passwordChanged(changed)
                 }
             }
-        analytics.capture("password_reset_completed", distinctId = user.id.toString())
+        if (AnalyticsContext.consented()) analytics.capture("password_reset_completed", distinctId = user.id.toString())
     }
 
     private fun invalidToken() = AppError.Invalid(ErrorCode("PASSWORD_RESET_TOKEN_INVALID"), "The link is invalid or has expired")
@@ -140,11 +141,13 @@ class ManageRoles(
         val changed = if (granted) user.withRole(role) else user.withoutRole(role)
         if (changed != user) {
             users.save(changed)
-            analytics.capture(
-                if (granted) "role_granted" else "role_revoked",
-                mapOf("role" to role.claim, "user_id" to user.id.toString()),
-                distinctId = actorId,
-            )
+            if (AnalyticsContext.consented()) {
+                analytics.capture(
+                    if (granted) "role_granted" else "role_revoked",
+                    mapOf("role" to role.claim, "user_id" to user.id.toString()),
+                    distinctId = actorId,
+                )
+            }
         }
         return changed
     }

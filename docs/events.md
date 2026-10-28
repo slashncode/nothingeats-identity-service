@@ -8,13 +8,17 @@ notification service needs them to send mails. Keep the topic's retention short.
 
 | `type` | When | `data` |
 |---|---|---|
-| `nothingeats.identity.user.registered.v1` | A new account was created | `userId`, `email`, `locale` (`de`/`en`), `verificationToken` |
-| `nothingeats.identity.user.registration-attempted.v1` | Someone registered with the address of an existing account | `userId`, `email`, `locale` |
-| `nothingeats.identity.user.verified.v1` | The address was confirmed; the account is active | `userId`, `email`, `locale` |
-| `nothingeats.identity.user.password-reset-requested.v1` | Someone asked for a new password for an existing account | `userId`, `email`, `locale`, `resetToken` |
-| `nothingeats.identity.user.password-changed.v1` | The password was changed with a reset link; all sessions ended | `userId`, `email`, `locale` |
-| `nothingeats.identity.user.magic-link-requested.v1` | Someone asked for a login link for an existing account | `userId`, `email`, `locale`, `magicToken` |
+| `nothingeats.identity.user.registered.v1` | A new account was created | `userId`, `email`, `locale` (`de`/`en`), `verificationToken`, `analytics` |
+| `nothingeats.identity.user.registration-attempted.v1` | Someone registered with the address of an existing account | `userId`, `email`, `locale`, `analytics` |
+| `nothingeats.identity.user.verified.v1` | The address was confirmed; the account is active | `userId`, `email`, `locale`, `analytics` |
+| `nothingeats.identity.user.password-reset-requested.v1` | Someone asked for a new password for an existing account | `userId`, `email`, `locale`, `resetToken`, `analytics` |
+| `nothingeats.identity.user.password-changed.v1` | The password was changed with a reset link; all sessions ended | `userId`, `email`, `locale`, `analytics` |
+| `nothingeats.identity.user.magic-link-requested.v1` | Someone asked for a login link for an existing account | `userId`, `email`, `locale`, `magicToken`, `analytics` |
 | `nothingeats.identity.user.deleted.v1` | The account was deleted (GDPR) | `userId` only |
+
+`analytics` says whether the request behind the event came with analytics consent (the browser sent
+its PostHog distinct id). Consumers send server-side analytics about the event (e.g. `email_sent`)
+only when it is `true`; events without it mean no consent.
 
 **`user.deleted` is an obligation for every consumer**: erase or anonymise everything held under that
 `userId`, idempotently. It carries no address on purpose; identity no longer has one. Older events on

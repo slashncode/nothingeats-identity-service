@@ -3,6 +3,7 @@ package io.github.slashncode.nothingeats.identity.adapters.messaging
 import io.github.slashncode.nothingeats.identity.application.UserEvents
 import io.github.slashncode.nothingeats.identity.domain.User
 import io.github.slashncode.nothingeats.identity.domain.UserId
+import io.github.slashncode.nothingeats.platform.core.analytics.AnalyticsContext
 import io.github.slashncode.nothingeats.platform.kafka.Outbox
 import io.github.slashncode.nothingeats.platform.persistence.PostgresDatabase
 import kotlinx.serialization.Serializable
@@ -28,6 +29,8 @@ data class UserRegisteredV1(
     val email: String,
     val locale: String,
     val verificationToken: String,
+    /** Whether the request came with analytics consent: consumers send server-side analytics only then. */
+    val analytics: Boolean,
 )
 
 @Serializable
@@ -35,6 +38,8 @@ data class RegistrationAttemptedV1(
     val userId: String,
     val email: String,
     val locale: String,
+    /** Whether the request came with analytics consent: consumers send server-side analytics only then. */
+    val analytics: Boolean,
 )
 
 @Serializable
@@ -42,6 +47,8 @@ data class UserVerifiedV1(
     val userId: String,
     val email: String,
     val locale: String,
+    /** Whether the request came with analytics consent: consumers send server-side analytics only then. */
+    val analytics: Boolean,
 )
 
 @Serializable
@@ -50,6 +57,8 @@ data class PasswordResetRequestedV1(
     val email: String,
     val locale: String,
     val resetToken: String,
+    /** Whether the request came with analytics consent: consumers send server-side analytics only then. */
+    val analytics: Boolean,
 )
 
 @Serializable
@@ -57,6 +66,8 @@ data class PasswordChangedV1(
     val userId: String,
     val email: String,
     val locale: String,
+    /** Whether the request came with analytics consent: consumers send server-side analytics only then. */
+    val analytics: Boolean,
 )
 
 @Serializable
@@ -65,6 +76,8 @@ data class MagicLinkRequestedV1(
     val email: String,
     val locale: String,
     val magicToken: String,
+    /** Whether the request came with analytics consent: consumers send server-side analytics only then. */
+    val analytics: Boolean,
 )
 
 /** Only the id: consumers erase what they hold about it; the address is already gone. */
@@ -87,7 +100,7 @@ class OutboxUserEvents(
                 UserTopic.NAME,
                 user.id.toString(),
                 UserTopic.REGISTERED,
-                UserRegisteredV1(user.id.toString(), user.email.value, user.locale.tag, verificationToken),
+                UserRegisteredV1(user.id.toString(), user.email.value, user.locale.tag, verificationToken, AnalyticsContext.consented()),
                 UserRegisteredV1.serializer(),
             )
         }
@@ -99,7 +112,7 @@ class OutboxUserEvents(
                 UserTopic.NAME,
                 existing.id.toString(),
                 UserTopic.REGISTRATION_ATTEMPTED,
-                RegistrationAttemptedV1(existing.id.toString(), existing.email.value, existing.locale.tag),
+                RegistrationAttemptedV1(existing.id.toString(), existing.email.value, existing.locale.tag, AnalyticsContext.consented()),
                 RegistrationAttemptedV1.serializer(),
             )
         }
@@ -111,7 +124,7 @@ class OutboxUserEvents(
                 UserTopic.NAME,
                 user.id.toString(),
                 UserTopic.VERIFIED,
-                UserVerifiedV1(user.id.toString(), user.email.value, user.locale.tag),
+                UserVerifiedV1(user.id.toString(), user.email.value, user.locale.tag, AnalyticsContext.consented()),
                 UserVerifiedV1.serializer(),
             )
         }
@@ -126,7 +139,7 @@ class OutboxUserEvents(
                 UserTopic.NAME,
                 user.id.toString(),
                 UserTopic.PASSWORD_RESET_REQUESTED,
-                PasswordResetRequestedV1(user.id.toString(), user.email.value, user.locale.tag, resetToken),
+                PasswordResetRequestedV1(user.id.toString(), user.email.value, user.locale.tag, resetToken, AnalyticsContext.consented()),
                 PasswordResetRequestedV1.serializer(),
             )
         }
@@ -138,7 +151,7 @@ class OutboxUserEvents(
                 UserTopic.NAME,
                 user.id.toString(),
                 UserTopic.PASSWORD_CHANGED,
-                PasswordChangedV1(user.id.toString(), user.email.value, user.locale.tag),
+                PasswordChangedV1(user.id.toString(), user.email.value, user.locale.tag, AnalyticsContext.consented()),
                 PasswordChangedV1.serializer(),
             )
         }
@@ -153,7 +166,7 @@ class OutboxUserEvents(
                 UserTopic.NAME,
                 user.id.toString(),
                 UserTopic.MAGIC_LINK_REQUESTED,
-                MagicLinkRequestedV1(user.id.toString(), user.email.value, user.locale.tag, token),
+                MagicLinkRequestedV1(user.id.toString(), user.email.value, user.locale.tag, token, AnalyticsContext.consented()),
                 MagicLinkRequestedV1.serializer(),
             )
         }

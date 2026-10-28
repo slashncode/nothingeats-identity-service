@@ -2,6 +2,7 @@ package io.github.slashncode.nothingeats.identity.application
 
 import io.github.slashncode.nothingeats.identity.domain.Email
 import io.github.slashncode.nothingeats.identity.domain.MagicLink
+import io.github.slashncode.nothingeats.platform.core.analytics.AnalyticsContext
 import io.github.slashncode.nothingeats.platform.core.analytics.ProductAnalytics
 import io.github.slashncode.nothingeats.platform.core.error.AppError
 import io.github.slashncode.nothingeats.platform.core.error.ErrorCode
@@ -68,7 +69,13 @@ class LoginWithMagicLink(
                 if (current != user) users.save(current)
                 sessions.issue(current)
             }
-        analytics.capture("user_logged_in", mapOf("method" to "magic_link"), distinctId = session.user.id.toString())
+        if (AnalyticsContext.consented()) {
+            analytics.capture(
+                "user_logged_in",
+                mapOf("method" to "magic_link"),
+                distinctId = session.user.id.toString(),
+            )
+        }
         return session
     }
 

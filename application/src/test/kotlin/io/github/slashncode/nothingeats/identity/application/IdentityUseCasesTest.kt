@@ -3,6 +3,7 @@ package io.github.slashncode.nothingeats.identity.application
 import io.github.slashncode.nothingeats.identity.domain.Email
 import io.github.slashncode.nothingeats.identity.domain.Locale
 import io.github.slashncode.nothingeats.identity.domain.Role
+import io.github.slashncode.nothingeats.platform.core.analytics.AnalyticsContext
 import io.github.slashncode.nothingeats.platform.core.analytics.ErasureResult
 import io.github.slashncode.nothingeats.platform.core.error.AppError
 import io.github.slashncode.nothingeats.platform.testing.RecordingAnalytics
@@ -12,6 +13,7 @@ import io.kotest.matchers.collections.shouldContainAll
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
+import kotlinx.coroutines.withContext
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -76,7 +78,13 @@ private class Identity(
 
 class IdentityUseCasesTest :
     FunSpec({
-        test("registration stores a pending user and asks for verification") {
+        // Requests from a browser with analytics consent carry its distinct id; the last test has none.
+        fun consented(
+            name: String,
+            body: suspend () -> Unit,
+        ) = test(name) { withContext(AnalyticsContext("visitor-1", "session-1")) { body() } }
+
+        consented("registration stores a pending user and asks for verification") {
             val identity = Identity()
 
             identity.register(" Ghost@NothingEats.dev ", "correct horse battery", "en-GB", CLIENT)
@@ -94,7 +102,7 @@ class IdentityUseCasesTest :
                 .name shouldBe "user_signed_up"
         }
 
-        test("registering an existing address looks the same to the caller but mails the owner instead") {
+        consented("registering an existing address looks the same to the caller but mails the owner instead") {
             val identity = Identity()
             identity.register("ghost@nothingeats.dev", "correct horse battery", "de", CLIENT)
 
@@ -104,7 +112,7 @@ class IdentityUseCasesTest :
             identity.events.events shouldContainExactly listOf("registered:ghost@nothingeats.dev", "attempted:ghost@nothingeats.dev")
         }
 
-        test("invalid input names the field") {
+        consented("invalid input names the field") {
             val identity = Identity()
 
             shouldThrow<AppError.Invalid> {
@@ -120,7 +128,7 @@ class IdentityUseCasesTest :
                 "password"
         }
 
-        test("a verification token works once and only before it expires") {
+        consented("a verification token works once and only before it expires") {
             val identity = Identity()
             identity.register("ghost@nothingeats.dev", "correct horse battery", "de", CLIENT)
             val token = identity.events.lastVerificationToken!!
@@ -137,7 +145,7 @@ class IdentityUseCasesTest :
             shouldThrow<AppError.Invalid> { identity.verify(identity.events.lastVerificationToken!!) }
         }
 
-        test("login answers the same for unknown addresses and wrong passwords") {
+        consented("login answers the same for unknown addresses and wrong passwords") {
             val identity = Identity()
             identity.verifiedUser()
 
@@ -159,7 +167,7 @@ class IdentityUseCasesTest :
                 "INVALID_CREDENTIALS"
         }
 
-        test("unverified accounts cannot log in") {
+        consented("unverified accounts cannot log in") {
             val identity = Identity()
             identity.register("ghost@nothingeats.dev", "correct horse battery", "de", CLIENT)
 
@@ -167,7 +175,7 @@ class IdentityUseCasesTest :
                 "EMAIL_NOT_VERIFIED"
         }
 
-        test("login issues tokens and replaces outdated password hashes") {
+        consented("login issues tokens and replaces outdated password hashes") {
             val identity = Identity()
             identity.verifiedUser()
             identity.hasher.outdated = true
@@ -181,7 +189,7 @@ class IdentityUseCasesTest :
                 .name shouldBe "user_logged_in"
         }
 
-        test("refreshing rotates the token within its family") {
+        consented("refreshing rotates the token within its family") {
             val identity = Identity()
             identity.verifiedUser()
             val first = identity.login("ghost@nothingeats.dev", "correct horse battery", CLIENT)
@@ -196,7 +204,7 @@ class IdentityUseCasesTest :
             identity.refresh(second.refreshToken).user.id shouldBe first.user.id
         }
 
-        test("reusing a refresh token revokes the whole family") {
+        consented("reusing a refresh token revokes the whole family") {
             val identity = Identity()
             identity.verifiedUser()
             val first = identity.login("ghost@nothingeats.dev", "correct horse battery", CLIENT)
@@ -207,7 +215,7 @@ class IdentityUseCasesTest :
             identity.analytics.events.any { it.name == "refresh_token_reused" } shouldBe true
         }
 
-        test("expired and unknown refresh tokens are rejected, logout revokes") {
+        consented("expired and unknown refresh tokens are rejected, logout revokes") {
             val identity = Identity()
             identity.verifiedUser()
             val session = identity.login("ghost@nothingeats.dev", "correct horse battery", CLIENT)
@@ -222,7 +230,7 @@ class IdentityUseCasesTest :
             identity.now = identity.now.plus(31, ChronoUnit.DAYS)
             shouldThrow<AppError.Unauthenticated> { identity.refresh(other.refreshToken) }.code.value shouldBe "REFRESH_TOKEN_EXPIRED"
         }
-        test("login is throttled per client and locks an account after ten failures, for every address alike") {
+        consented("login is throttled per client and locks an account after ten failures, for every address alike") {
             val identity = Identity()
             identity.verifiedUser()
 
@@ -241,7 +249,7 @@ class IdentityUseCasesTest :
             shouldThrow<AppError.RateLimited> { identity.login("y@nothingeats.dev", "wrong password!!", "10.9.9.9") }
         }
 
-        test("password reset: same answer for unknown addresses, new password ends every session") {
+        consented("password reset: same answer for unknown addresses, new password ends every session") {
             val identity = Identity()
             identity.verifiedUser()
             val session = identity.login("ghost@nothingeats.dev", "correct horse battery", CLIENT)
@@ -268,7 +276,7 @@ class IdentityUseCasesTest :
                 "PASSWORD_RESET_TOKEN_INVALID"
         }
 
-        test("reset links expire, prove the address, and are capped at three mails an hour per address") {
+        consented("reset links expire, prove the address, and are capped at three mails an hour per address") {
             val identity = Identity()
             identity.register("late@nothingeats.dev", "correct horse battery", "de", CLIENT)
 
@@ -287,7 +295,7 @@ class IdentityUseCasesTest :
             shouldThrow<AppError.RateLimited> { identity.requestReset("late@nothingeats.dev", "10.0.0.3") }
         }
 
-        test("bootstrap admins get the role on verification and login, others never") {
+        consented("bootstrap admins get the role on verification and login, others never") {
             val identity = Identity()
             identity.verifiedUser("boss@nothingeats.dev")
             identity.verifiedUser("ghost@nothingeats.dev")
@@ -298,7 +306,7 @@ class IdentityUseCasesTest :
             identity.login("ghost@nothingeats.dev", "correct horse battery", CLIENT).user.roles shouldBe setOf(Role.CUSTOMER)
         }
 
-        test("admins grant and revoke roles, but not their own admin role") {
+        consented("admins grant and revoke roles, but not their own admin role") {
             val identity = Identity()
             identity.verifiedUser("boss@nothingeats.dev")
             identity.verifiedUser("ghost@nothingeats.dev")
@@ -318,7 +326,7 @@ class IdentityUseCasesTest :
             identity.analytics.events.map { it.name } shouldContainAll listOf("role_granted", "role_revoked")
         }
 
-        test("magic link: same answer for every address, one use, logs in and verifies") {
+        consented("magic link: same answer for every address, one use, logs in and verifies") {
             val identity = Identity()
             identity.register("late@nothingeats.dev", "correct horse battery", "de", CLIENT)
 
@@ -340,7 +348,7 @@ class IdentityUseCasesTest :
             shouldThrow<AppError.Unauthenticated> { identity.loginWithMagicLink(identity.events.lastMagicToken!!) }
         }
 
-        test("export holds the account, consent and active sessions, but no secrets") {
+        consented("export holds the account, consent and active sessions, but no secrets") {
             val identity = Identity()
             identity.verifiedUser()
             val session = identity.login("ghost@nothingeats.dev", "correct horse battery", CLIENT)
@@ -354,7 +362,7 @@ class IdentityUseCasesTest :
             export.activeSessions shouldBe 2
         }
 
-        test("deletion needs the password, removes everything, and leaves only the id for erasure") {
+        consented("deletion needs the password, removes everything, and leaves only the id for erasure") {
             val identity = Identity()
             identity.verifiedUser()
             val session = identity.login("ghost@nothingeats.dev", "correct horse battery", CLIENT)
@@ -371,7 +379,7 @@ class IdentityUseCasesTest :
             shouldThrow<AppError.Unauthenticated> { identity.refresh(session.refreshToken) }
         }
 
-        test("analytics erasure waits without a key, retries failures, and finishes once") {
+        consented("analytics erasure waits without a key, retries failures, and finishes once") {
             val identity = Identity()
             identity.verifiedUser()
             val id = identity.login("ghost@nothingeats.dev", "correct horse battery", CLIENT).user.id
@@ -387,5 +395,14 @@ class IdentityUseCasesTest :
             identity.eraseAnalytics() shouldBe ErasureRun(erased = 1, failed = 0, waiting = 0)
             identity.eraseAnalytics() shouldBe ErasureRun(erased = 0, failed = 0, waiting = 0)
             identity.analytics.erased shouldBe listOf(id.toString())
+        }
+
+        test("without analytics consent nothing is captured, for anyone") {
+            val identity = Identity()
+
+            identity.verifiedUser()
+            identity.login("ghost@nothingeats.dev", "correct horse battery", CLIENT)
+
+            identity.analytics.events shouldBe emptyList()
         }
     })

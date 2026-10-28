@@ -4,6 +4,7 @@ import io.github.slashncode.nothingeats.identity.domain.Email
 import io.github.slashncode.nothingeats.identity.domain.RefreshToken
 import io.github.slashncode.nothingeats.identity.domain.User
 import io.github.slashncode.nothingeats.identity.domain.UserId
+import io.github.slashncode.nothingeats.platform.core.analytics.AnalyticsContext
 import io.github.slashncode.nothingeats.platform.core.analytics.ProductAnalytics
 import io.github.slashncode.nothingeats.platform.core.error.AppError
 import io.github.slashncode.nothingeats.platform.core.error.ErrorCode
@@ -82,7 +83,13 @@ class Login(
                 if (current != user) users.save(current)
                 sessions.issue(current)
             }
-        analytics.capture("user_logged_in", mapOf("method" to "password"), distinctId = user.id.toString())
+        if (AnalyticsContext.consented()) {
+            analytics.capture(
+                "user_logged_in",
+                mapOf("method" to "password"),
+                distinctId = user.id.toString(),
+            )
+        }
         return session
     }
 }
@@ -107,7 +114,7 @@ class RefreshSession(
         if (token.wasAlreadyUsed || !transactions.run { refreshTokens.markUsed(token.id, now) }) {
             transactions.run { refreshTokens.revokeFamily(token.familyId, now) }
             log.warn("Refresh token reuse for user {}, revoked token family {}", token.userId, token.familyId)
-            analytics.capture("refresh_token_reused", distinctId = token.userId.toString())
+            if (AnalyticsContext.consented()) analytics.capture("refresh_token_reused", distinctId = token.userId.toString())
             throw unauthenticated("REFRESH_TOKEN_REUSED")
         }
         if (token.isExpired(now)) throw unauthenticated("REFRESH_TOKEN_EXPIRED")
