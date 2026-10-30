@@ -20,9 +20,10 @@ jobs:
     with:
       verify-image: true
 
-  # Services push a signed image on main; the template itself only verifies that it builds.
+  # Services push a signed image on main (also from a manual run, e.g. after a platform update);
+  # the template itself only verifies that it builds.
   image:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository != 'slashncode/nothingeats-kotlin-service-template'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository != 'slashncode/nothingeats-kotlin-service-template'
     needs: kotlin
     uses: slashncode/nothingeats-ci/.github/workflows/kotlin-image.yml@main
     permissions:
